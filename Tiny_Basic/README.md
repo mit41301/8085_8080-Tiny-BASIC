@@ -17,6 +17,7 @@ The source code was built with the asmx cross assembler running on a Mac.
 <p>
 The ROM image was tested with the <a href="http://www.glitchwrks.com/2011/10/29/sbc-rev-2">8085 rev2 board from glitchwrks</a>
 
+update by mit41301 on 20260922  
 https://www.retrotechnology.com/memship/asmx.html  
 
 asmx20 -l -o -C8085U tinybasic.asm  
