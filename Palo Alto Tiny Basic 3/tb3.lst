@@ -1,0 +1,1652 @@
+                        ;**************************************
+                        ;*
+                        ;* T B I
+                        ;* TINY BASIC INTERPRETER
+                        ;* VERSION 3.0
+                        ;* FOR 8080 SYSTEM
+                        ;* LI-CHEN WANG
+                        ;* 26 APRIL, 1977
+                        ;*
+                        ;* Paper copy of source code converted to this file
+                        ;* for Oshonsoft Assembler
+                        ;* and verified against paper copy of object file
+                        ;* by Lyndon Schultz 13 August 2024
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** MEMORY USAGE ***
+                        ;*
+                        ;* 0080-01FF ARE FOR FOR VARIABLES, INPUT LINE, AND STACK
+                        ;* 2000-3FFF ARE FOR TINY BASIC TEXT & ARRAY
+                        ;* F000-F7FF ARE FOR TBI CODE
+                        ;*
+   0080                 BOTSCR EQU 0080H     ; BOTTOM OF SCATCHPAD
+   0200                 TOPSCR EQU 0200H     ; TOP OF SCATCHPAD
+   2000                 BOTRAM EQU 2000H     ; BOTTOM OF RAM
+   4000                 DFTLMT EQU 4000H
+   f000                 BOTROM EQU 0F000H     ; BOTTOM OF ROM
+   000d                 CR     EQU 0DH
+   000a                 LF     EQU 0AH
+                        ;*
+                        ;* DEFINE VARIABLES. BUFFER, AND STACK IN RAM
+                        ;*
+   0080                        ORG BOTSCR
+   0080                 KEYWRD DS 1       ; WAS INIT DONE?
+   0081                 TXTLMT DS 2       ; ->LIMIT OF TEXT AREA
+   0083                 VARBGN DS 2*26    ; TB VARIABLES A-Z
+   00b7                 CURRNT DS 2       ; POINTS TO CURRENT LINE
+   00b9                 STKGOS DS 2       ; SAVES SP IN 'G0SUB'
+   00bb                 VARNXT DS 0       ; TEMP STORAGE
+   00bb                 STKINP DS 2       ; SAVES SP IN 'INPUT'
+   00bd                 LOPVAR DS 2       ; 'FOR* LOOP SAVE AREA
+   00bf                 LOPINC DS 2       ; INCREMENT
+   00c1                 LOPLMT DS 2       ; LIMIT
+   00c3                 LOPLN  DS 2       ; LINE NUMBER
+   00c5                 LOPPT  DS 2       ; TEXT POINTER
+   00c7                 RANPNT DS 2       ; RANDOM NUMBER POINTER
+   00c9                        DS 1       ; EXTRA BYTE FOR BUFFER
+   00ca                 BUFFER DS 132     ; INPUT BUFFER
+   014e                 BUFEND DS 0       ; BUFFER ENDS
+   014e                        DS 4       ; EXTRA BYTES FOR STACK
+   0152                 STKLMT DS 0       ; SOFT LIMIT FOR STACK
+   0200                        ORG TOPSCR
+   0200                 STACK  DS 0       ; STACK STARTS HERE
+   2000                        ORG BOTRAM
+   2000                 TXTUNF DS 2
+   2002                 TEXT   DS 2
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** INITIALIZE ***
+                        ;*
+   f000                       ORG BOTROM
+   f000   31 00 02      INIT  LXI  SP,STACK
+   f003   cd 93 f7            CALL CRLF
+   f006   21 80 00            LXI  H,KEYWRD     ; AT POWER ON KEYWRD IS
+   f009   3e c3               MVI  A,0C3H        ; PROBABLY NOT C3
+   f00b   be                  CMP  M
+   f00c   ca 26 f0            JZ   TELL         ; IT IS C3, CONTINUE
+   f00f   77                  MOV  M,A          ; NO, SET IT TO C3
+   f010   21 00 40            LXI  H,DFTLMT     ; AND SET DEFAULT VALUE
+   f013   22 81 00            SHLD TXTLMT       ; IN 'TXTLMT'
+   f016   3e f0               MVI  A,HIGH BOTROM ; INITIALIZE RANPNT
+   f018   32 c8 00            STA  RANPNT +1
+   f01b   21 06 20      PURGE LXI  H,TEXT+4     ; PURGE TEXT AREA
+   f01e   22 00 20            SHLD TXTUNF
+   f021   26 ff               MVI  H,0FFH
+   f023   22 02 20            SHLD TEXT
+   f026   11 2f f0      TELL  LXI  D,MSG        ; TELL USER
+   f029   cd 65 f6            CALL PRTSTG       ; ***********************
+   f02c   c3 53 f0            JMP  RSTART       ; **** JMP USER-INIT ****
+   f02f   54 49 4e 59   MSG   DB  "TINY "       ; ***********************
+   f033   20            
+   f034   42 41 53 49         DB  "BASIC V3.0"
+   f038   43 20 56 33   
+   f03c   2e 30         
+   f03e   0d                  DB  CR
+   f03f   4f 4b         OK    DB  "OK"
+   f041   0d                  DB  CR
+   f042   57 48 41 54   WHAT  DB  "WHAT?"
+   f046   3f            
+   f047   0d                  DB  CR
+   f048   48 4f 57 3f   HOW   DB  "HOW?"
+   f04c   0d                  DB  CR
+   f04d   53 4f 52 52   SORRY DB  "SORRY"
+   f051   59            
+   f052   0d                  DB  CR
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** DIRECT COMMAND / TEXT COLLECTER ***
+                        ;*
+                        ;* TBI PRINTS OUT "OK(CR)", AND THEN IT PROMPTS ">" AND READS A LINE.
+                        ;* IF THE LINE STARTS WITH A NON-ZERO NUMBER. THIS NUMBER IS THE LINE
+                        ;* NUMBER. THE LINE NUMBER (IN 16 BIT BINARY) AND THE REST OF THE LINE
+                        ;* (INCLUDING CR) IS STORED IN THE MEMORY. IF A LINE WITH THE SAME
+                        ;* LINE NUMBER IS ALREADY THERE, IT IS REPLACED BY THE NEW ONE. IF THE
+                        ;* REST OF THE LINE CONSISTS OF A CR ONLY, IT IS NOT STORED AND ANY
+                        ;* EXISTING LINE WITH THE SAME LINE NUMBER IS DELETED.
+                        ;* AFTER A LINE INSERTED, REPLACED, OR DELETED, THE PROGRAM LOOPS
+                        ;* BACK AND ASKS FOR ANOTHER LINE. THIS LOOP WILL BE TERMINATED WHEN IT
+                        ;* READS A LINE WITH ZERO OR NO LINE NUM8ER; AND CONTROL IS TRANSFERED
+                        ;* TO "DIRECT".
+                        ;* TINY BASIC PROGRAM SAVE AREA STARTS AT THE MEMORY LOCATION LABELED
+                        ;* "TEXT". THE END OF TEXT IS MARKED BY 2 BYTES XX FF. FOLLOWING
+                        ;* THESE ARE 2 BYTES RESERVED FOR THE ARRAY ELEMENT @(0). THE CONTENT
+                        ;* OF LOCATION LABELED "TXTUNF" POINTS TO ONE AFTER @(0).
+                        ;* THE MEMORY LOCATION "CURRNT" POINTS TO THE LINE NUMBER THAT IS
+                        ;* CURRENTLY BEING INTERPRETED. WHILE WE ARE IN THIS LOOP OR WHILE WE
+                        ;* ARE INTERPRETING A DIRECT COMMAND (SEE NEXT SECTION). "CURRNT"
+                        ;* SHOULD POINT TO A0.
+                        ;*
+   f053   31 00 02      RSTART LXI  SP,STACK    ; RE-INITIALIZE STACK
+   f056   21 5d f0             LXI  H,ST1 + 1   ; LITERAL 0
+   f059   22 b7 00             SHLD CURRNT      ; CURRNT->LINE NUMBER = 0
+   f05c   21 00 00      ST1    LXI  H,0
+   f05f   22 bd 00             SHLD LOPVAR
+   f062   22 b9 00             SHLD STKGOS
+   f065   11 3f f0             LXI  D,OK        ; DE—> STRING
+   f068   cd 65 f6             CALL PRTSTG      ; PRINT STRING UNTIL CR
+   f06b   3e 3e         ST2    MVI  A,">"       ; PROMPT '>' AND
+   f06d   cd 9b f7             CALL GETLN       ; READ A LINE
+   f070   d5                   PUSH D           ; DE—>END OF LINE
+   f071   11 ca 00             LXI  D,BUFFER    ; DE->BEGINNING OF LINE
+   f074   cd cf f5             CALL TSTNUM      ; TEST IF IT IS A NUMBER
+   f077   cd 22 f5             CALL IGNBLK
+   f07a   7c                   MOV  A,H         ; HL = VALUE OF THE LINE NUMBER OR
+   f07b   b5                   ORA  L           ; 0 IF NO LINE NUMBER WAS FOUND
+   f07c   c1                   POP  B           ; BC—>END OF LINE
+   f07d   ca cc f0             JZ   DIRECT
+   f080   1b                   DCX  D           ; BACKUP DE AND SAVE
+   f081   7c                   MOV  A,H         ; VALUE OF LINE NUMBER THERE
+   f082   12                   STAX D
+   f083   1b                   DCX  D
+   f084   7d                   MOV  A,L
+   f085   12                   STAX D
+   f086   c5                   PUSH B           ; BC.DE—>BEGIN. END
+   f087   d5                   PUSH D
+   f088   79                   MOV  A,C
+   f089   93                   SUB  E
+   f08a   f5                   PUSH PSW         ; A = NUMBER OF BYTES IN LINE
+   f08b   cd 64 f5             CALL FNDLN       ; FIND THIS LINE IN SAVE
+   f08e   d5                   PUSH D           ; AREA. DE->SAVE AREA
+   f08f   c2 96 f0             JNZ  ST3         ; NZ:NOT FOUND. INSERT
+   f092   d5                   PUSH D           ; Z:FOUND. DELETE IT
+   f093   cd 7d f5             CALL FNDNXT      ; SET DE->NEXT LINE
+   f096   c1            ST3    POP  B           ; BC—>LINE TO BE DELETED
+   f097   2a 00 20             LHLD TXTUNF      ; HL->UNFILLED SAVE AREA
+   f09a   cd 00 f6             CALL MVUP        ; MOVE UP TO DELETE
+   f09d   60                   MOV  H,B         ; TXTUNF->UNFILLED AREA
+   f09e   69                   MOV  L,C
+   f09f   22 00 20             SHLD TXTUNF      ; UPDATE
+   f0a2   c1                   POP  B           ; GET READY TO INSERT
+   f0a3   2a 00 20             LHLD TXTUNF      ; BUT FIRST CHECK IF
+   f0a6   f1                   POP  PSW         ; THE LENGTH OF NEW LINE
+   f0a7   e5                   PUSH H           ; IS 3 (LINE NUMBER AND CR)
+   f0a8   fe 03                CPI  3           ; THEN DO NOT INSERT
+   f0aa   ca 53 f0             JZ   RSTART      ; MUST CLEAR THE STACK
+   f0ad   85                   ADD  L           ; COMPUTE NEW TXTUNF
+   f0ae   5f                   MOV  E,A
+   f0af   3e 00                MVI  A, 0
+   f0b1   8c                   ADC  H
+   f0b2   57                   MOV  D,A         ; DE—> NEW UNFILLED AREA
+   f0b3   2a 81 00             LHLD TXTLMT      ; CHECK TO SEE IF THERE
+   f0b6   eb                   XCHG
+   f0b7   cd ed f4             CALL COMP        ; IS ENOUGH SPACE
+   f0ba   d2 5d f5             JNC  QSORRY      ; SORRY. NO ROOM FOR IT
+   f0bd   22 00 20             SHLD TXTUNF      ; OK, UPDATE TXTUNF
+   f0c0   d1                   POP  D           ; DE—>OLD UNFILLED AREA
+   f0c1   cd 0b f6             CALL MVDOWN
+   f0c4   d1                   POP  D           ; DE—>BEGIN. HL—>END
+   f0c5   e1                   POP  H
+   f0c6   cd 00 f6             CALL MVUP        ; MOVE NEW LINE TO SAVE
+   f0c9   c3 6b f0             JMP  ST2         ; AREA
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** DIRECT *** & EXEC ***
+                        ;*
+                        ;* THIS SECTION OF THE CODE TESTS A STRING AGAINST A TABLE. WHEN A
+                        ;* MATCH IS FOUND, CONTROL IS TRANSFERED TO THE SECTION OF CODE
+                        ;* ACCORDING TO THE TABLE.
+                        ;*
+                        ;* AT 'EXEC', DE SHOULD POINT TO THE STRING AND HL SHOULD POINT TO THE
+                        ;* TABLE—1. AT 'DIRECT', DE SHOULD POINT TO THE STRING. HL WILL BE SET
+                        ;* UP TO POINT TO TAB1-1, WHICH IS THE TABLE OF ALL DIRECT AND
+                        ;* STATEMENT COMMANDS.
+                        ;*
+                        ;* A '.' IN THE STRING WILL TERMINATE THE TEST AND THE PARTIAL MATCH
+                        ;* WILL BE CONSIDERED AS A MATCH. E.G.. 'P.', 'PR.', 'PRI.', 'PRIN.',
+                        ;* OR 'PRINT' WILL ALL MATCH 'PRINT'.
+                        ;*
+                        ;* THE TABLE CONSISTS OF ANY NUMBER OF ITEMS. EACH ITEM IS A STRING OF
+                        ;* CHARACTERS WITH BIT 7 SET TO 0 AND A JUMP ADDRESS STORED HI-LOW WITH
+                        ;* BIT 7 OF THE HIGH BYTE SET TO 1.
+                        ;*
+                        ;* END OF TABLE IS AN ITEM WITH A JUMP ADDRESS ONLY. IF THE STRING
+                        ;* DOES NOT MATCH ANY OF THE OTHER ITEMS, IT WILL MATCH THIS NULL ITEM
+                        ;* AS DEFAULT.
+                        ;*
+   f0cc   21 02 f7      DIRECT LXI H,TAB1-1     ; *** DIRECT ***
+                        ;*
+   f0cf   cd 22 f5      EXEC   CALL IGNBLK      ; *** EXEC ***
+   f0d2   d5                   PUSH D           ; SAVE POINTER
+   f0d3   1a            EX1    LDAX D           ; IF FOUND '.' IN STRING
+   f0d4   13                   INX  D           ; BEFORE ANY MISMATCH
+   f0d5   fe 2e                CPI  "."         ; WE DECLARE A MATCH
+   f0d7   ca f0 f0             JZ   EX3
+   f0da   23                   INX  H           ; HL—>TABLE
+   f0db   be                   CMP  M           ; IF MATCH, TEST NEXT
+   f0dc   ca d3 f0             JZ   EX1
+   f0df   3e 7f                MVI  A,7FH       ; ELSE, SEE IF BIT 7
+   f0e1   1b                   DCX  D           ; OF TABLE IS SET. WHICH
+   f0e2   be                   CMP  M           ; IS THE JUMP ADDR. (HI)
+   f0e3   da f7 f0             JC   EX5         ; C:YES. MATCHED
+   f0e6   23            EX2    INX  H           ; NC:NO. FIND JUMP ADDR.
+   f0e7   be                   CMP  M
+   f0e8   d2 e6 f0             JNC  EX2
+   f0eb   23                   INX  H           ; BUMP TO NEXT TAB. ITEM
+   f0ec   d1                   POP  D           ; RESTORE STRING POINTER
+   f0ed   c3 cf f0             JMP  EXEC        ; TEST AGAINST NEXT ITEM
+   f0f0   3e 7f         EX3    MVI  A,7FH       ; PARTIAL MATCH. FIND
+   f0f2   23            EX4    INX  H           ; JUMP ADDR.. WHICH IS
+   f0f3   be                   CMP  M           ; FLAGGED BY BIT 7
+   f0f4   d2 f2 f0             JNC  EX4
+   f0f7   7e            EX5    MOV  A,M         ; LOAD HL WITH THE JUMP
+   f0f8   23                   INX  H           ; ADDRESS FROM THE TABLE
+   f0f9   6e                   MOV  L,M         ;  ******************
+   f0fa   e6 ff                ANI  0FFH         ; ***** ANI 7FH ******
+   f0fc   67                   MOV  H,A         ;  ******************
+   f0fd   f1                   POP  PSW         ; CLEAN UP THE GARBAGE
+   f0fe   e9                   PCHL             ; AND WE GO DO IT
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* WHAT FOLLOWS IS THE C0DE T0 EXECUTE DIRECT AND STATEMENT COMMANDS.
+                        ;* CONTROL IS TRANSFERED TO THESE POINTS VIA THE COMMAND TABLE LOOKUP
+                        ;* CODE OF 'DIRECT' ANC 'EXEC' IN LAST SECTION. AFTER THE COMMANO IS
+                        ;* EXECUTED, CONTROL IS TRANSFERED TO OTHER SECTIONS AS FOLLOWS:
+                        ;*
+                        ;* FOR 'LIST', 'NEW', AND 'STOP': GO BACK TO 'RSTART'
+                        ;* FOR 'RUN' GO EXECUTE THE FIRST STORED LINE IF ANY: ELSE GO BACK TO
+                        ;* 'RSTATT'.
+                        ;* FOR 'GOTO' AND 'GOSUB': GO EXECUTE THE TARGET LINE.
+                        ;* FOR 'RETURN' AND 'NEXT': GO BACK TO SAVED RETURN LINE.
+                        ;* FOR ALL OTHERS: IF 'CURRNT' -> 0, GO TO 'RSTART', ELSE GO EXECUTE
+                        ;* NEXT COMMAND. (THIS IS DONE IN 'FINISH'.)
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** NEW *** STOP *** RUN (& FRIENDS) *** & GOTO ***
+                        ;* 'NEW(CR)' RESETS 'TXTUNF'
+                        ;*
+                        ;* 'STOP(CR)' GOES BACK TO 'RSTART'
+                        ;*
+                        ;* 'RUN(CR)' FINDS THE FIRST STORED LINE, STORE ITS ADDRESS (IN
+                        ;* 'CURRNT'), AND START EXECUTE IT. NOTE THAT ONLY THOSE
+                        ;* COMMANDS IN TAB2 ARE LEGAL FOR STORED PROGRAM.
+                        ;*
+                        ;* THERE ARE 3 MORE ENTRIES IN 'RUN':
+                        ;* 'RUNNXL' FINDS N£XT LINE. STORES ITS ADDR. AND EXECUTES IT.
+                        ;* 'RUNTSL' STORES THE ADDRESS OF THIS LINE AND EXECUTES IT.
+                        ;* 'RUNSML' CONTINUES THE EXECUTION ON SAME LINE.
+                        ;*
+                        ;* 'GOTO EXPR(CR)' EVALUATES THE EXPRESSION, FIND THE TARGET
+                        ;* LINE, AND JUMP TO 'RUNTSL' TO DO IT.
+                        ;*
+   f0ff   cd 2a f5      NEW    CALL ENDCHK      ; *** NEW(CR) ***
+   f102   c3 1b f0             JMP  PURGE
+   f105   cd 2a f5      STOP   CALL ENDCHK      ; *** STOP(CR) ***
+   f108   c3 53 f0             JMP  RSTART
+                        ;*
+   f10b   cd 2a f5      RUN    CALL ENDCHK      ; *** RUN(CR) ***
+   f10e   11 02 20             LXI  D,TEXT      ; FIRST SAVED LINE
+                        ;*
+   f111   21 00 00      RUNNXL LXI  H,0         ; *** RUNNXL ***
+   f114   cd 6c f5             CALL FNDLP       ; FIND WHATEVER LINE NUMBER
+   f117   da 53 f0             JC   RSTART      ; C:PASSED TXTUNF, QUIT
+                        ;*
+   f11a   eb            RUNTSL XCHG             ; *** RLNTSL ***
+   f11b   22 b7 00             SHLD CURRNT      ; SET 'CURRNT'->LINE NUMBER
+   f11e   eb                   XCHG
+   f11f   13                   INX  D           ; BUMP PASS LINE NUMBER
+   f120   13                   INX  D
+                        ;*
+   f121   cd 98 f7      RUNSML CALL CHKIO       ; *** RUNSML ***
+   f124   21 12 f7             LXI  H,TAB2-1    ; FIND COMMAND IN TAB2
+   f127   c3 cf f0             JMP  EXEC        ; AND EXECUTE IT
+                        ;*
+   f12a   cd 5b f3      GOTO   CALL EXPR        ; *** GOTO EXPR ***
+   f12d   d5                   PUSH D           ; SAVE FOR ERROR ROUTINE
+   f12e   cd 2a f5             CALL ENDCHK      ; MUST FIND A CR
+   f131   cd 64 f5             CALL FNDLN       ; FIND THE TARGET LINE
+   f134   c2 fa f5             JNZ  AHOW        ; NO SUCH LINE NUMBER
+   f137   f1                   POP  PSW         ; CLEAR THE "PUSH DE"
+   f138   c3 1a f1             JMP  RUNTSL      ; GO DO IT
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** LIST *** & PRINT ***
+                        ;*
+                        ;* LIST HAS THREE FORMS:
+                        ;* 'LIST(CR)' LISTS ALL SAVED LINES
+                        ;* 'LIST N(CR)' START LIST AT LINE N
+                        ;* 'LIST N1, N2(CR)' START LIST AT LINE N1 FOR N2 LINES.
+                        ;*  YOU CAN STOPTHE LISTING BY CONTROL C KEY
+                        ;*
+                        ;* PRINT COMMAND IS 'PRINT ....,' OR 'PRINT ....(CR)'
+                        ;* WHERE '....' IS A LIST OF EXPRESIONS, FORMATS, AND/OR STRINGS.
+                        ;* THESE ITEMS ARE SEPERATED BY COMMAS.
+                        ;*
+                        ;* A FORMAT IS A POUND SIGN FOLLOWED BY A NUMBER. IT CONTROLS THE
+                        ;* NUMBER OF SPACES THE VALUE OF A EXPRESION IS GOING TO BE PRINTED.
+                        ;* IT STAYS EFFECTIVE FOR THE REST OF THE PRINT COMMAND UNLESS CHANGED
+                        ;* BY ANOTHER FORMAT. IF NO FORMAT IS SPECIFIED, 8 POSITIONS WILL BE
+                        ;* USED.
+                        ;*
+                        ;* A STRING IS QUOTED IN A PAIR OF SINGLE QUOTES OR A PAIR OF DOUBLE
+                        ;* QUOTES.
+                        ;*
+                        ;* CONTROL CHARACTERS AND LOWER CASE LETTERS CAN BE INCLUDED INSIDE THE
+                        ;* QUOTES. ANOTHER (BETTER) WAY OF GENERATING CONTROL CHARACTERS ON
+                        ;* THE OUTPUT IS USE THE UP-ARROW CHARACTER FOLLOWED BY A LETTER. |L
+                        ;*  |L MEANS FF, |I MEANS HT, |G MEANS BELL ETC.
+                        ;*
+                        ;* A (CRLF) IS GENERATED AFTER THE ENTIRE LIST HAS BEEN PRINTED OR IF
+                        ;* THE LIST IS A NULL LIST. HOWEVER IF THE LIST ENDED WITH A COMMA, NO
+                        ;* (CRLF) IS GENERATED.
+                        ;*
+   f13b   cd cf f5      LIST   CALL TSTNUM      ; TEST IF THERE IS A NUMBER
+   f13e   e5                   PUSH H
+   f13f   21 ff ff             LXI  H,0FFFFH
+   f142   cd bb f5             CALL TSTCH       ; TSTCH ROUTINE LOOKS AT
+   f145   2c                   DB   ","         ; NEXT BYTE AFTER CALL
+   f146   03                   DB   LS1-$-1     ; AND LOCATION OFFSET FOR RELATIVE JUMP
+   f147   cd cf f5             CALL TSTNUM
+   f14a   e3            LS1    XTHL
+   f14b   cd 2a f5             CALL ENDCHK      ; IF NO NUMBER WE GET A 0
+   f14e   cd 64 f5             CALL FNDLN       ; FIND THIS OR NEXT LINE
+   f151   da 53 f0      LS2    JC   RSTART      ; C:PASSED TXTUNF
+   f154   e3                   XTHL
+   f155   7c                   MOV  A,H
+   f156   b5                   ORA  L
+   f157   ca 53 f0             JZ   RSTART
+   f15a   2b                   DCX  H
+   f15b   e3                   XTHL
+   f15c   cd f2 f6             CALL PRTLN       ; PRINT THE LINE
+   f15f   cd 65 f6             CALL PRTSTG
+   f162   cd 98 f7             CALL CHKIO
+   f165   cd 6c f5             CALL FNDLP       ; FIND NEXT LINE
+   f168   c3 51 f1             JMP  LS2         ; AND LOOP BACK
+                        ;*
+   f16b   0e 08         PRINT  MVI  C,8         ; C= NUMBER OF SPACES
+   f16d   cd bb f5             CALL TSTCH       ; IF NULL LIST & ";"
+   f170   3b                   DB   ";"
+   f171   06                   DB   PR1-$-1
+   f172   cd 93 f7             CALL CRLF        ; GIVE CR-LF AND
+   f175   c3 21 f1             JMP  RUNSML      ; CONTINUE SAME LINE
+   f178   cd bb f5      PR1    CALL TSTCH       ; IF NULL LIST (CR)
+   f17b   0d                   DB   CR
+   f17c   24                   DB   PR6-$-1
+   f17d   cd 93 f7             CALL CRLF        ; ALSO GIVE CR-LF AND
+   f180   c3 11 f1             JMP RUNNXL       ; GO TO NEXT LINE
+   f183   cd bb f5      PR2    CALL TSTCH       ; ELSE IS IT FORMAT?
+   f186   23                   DB   "#"
+   f187   0e                   DB   PR4-$-1
+   f188   cd 5b f3      PR3    CALL EXPR        ; YES, EVALUATE EXPR.
+   f18b   3e c0                MVI  A,0C0H
+   f18d   a5                   ANA  L
+   f18e   b4                   ORA  H
+   f18f   c2 f9 f5             JNZ  QHOW
+   f192   4d                   MOV  C,L         ; AND SAVE IT IN C
+   f193   c3 9c f1             JMP  PR5         ; LOOK FOR MORE TO PRINT
+   f196   cd 74 f6      PR4    CALL QTSTG       ; OR IS IT A STRING?
+   f199   c3 ba f1             JMP  PR9         ; IF NOT, MUST BE EXPR.
+   f19c   cd bb f5      PR5    CALL TSTCH       ; IF "," GO FIND NEXT
+   f19f   2c                   DB   ","
+   f1a0   13                   DB   PR8-$-1
+   f1a1   cd bb f5      PR6    CALL TSTCH
+   f1a4   2c                   DB   ","
+   f1a5   08                   DB   PR7-$-1
+   f1a6   3e 20                MVI  A," "
+   f1a8   cd 95 f7             CALL OUTCH
+   f1ab   c3 a1 f1             JMP  PR6
+   f1ae   cd 0f f5      PR7    CALL FIN         ; IN THE LIST.
+   f1b1   c3 83 f1             JMP  PR2         ; LIST CONTINUES
+   f1b4   cd 93 f7      PR8    CALL CRLF        ; LIST ENDS
+   f1b7   c3 09 f5             JMP  FINISH
+   f1ba   cd 5b f3      PR9    CALL EXPR        ; EVALUATE THE EXPR
+   f1bd   c5                   PUSH B
+   f1be   cd ae f6             CALL PRTNUM      ; PRINT THE VALUE
+   f1c1   c1                   POP  B
+   f1c2   c3 9c f1             JMP PR5          ; MORE TO PRINT?
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** GOSUB *** & RETURN ***
+                        ;*
+                        ;* 'GOSUB EXPR;' OR 'GOSUB EXPR (CR)' IS LIKE THE 'GOTO' COMMAND,
+                        ;* EXCEPT THAT THE CURRENT TEXT POINTER, STACK POINTER ETC. ARE SAVE SO
+                        ;* THAT EXECUTION CAN BE CONTINUUED AFTER THE SUBROUTINE 'RETURN', IN
+                        ;* ORDER THAT 'GOSUB' CAN BE NESTED (AND EVEN RECURSIVE). THE SAVE AREA
+                        ;* MUST BE STACKED. THE STACK POINTER IS SAVED IN 'STKGOS'. THE OLD
+                        ;* 'STKGOS' IS SAVED IN THE STACK. IF WE ARE IN THE MAIN ROUTINE,
+                        ;* 'STKGOS' IS ZERO (THIS WAS DONE BY THE "MAIN" SECTION OF THE CODE).
+                        ;* BUT WE STILL SAVE IT AS A FLAG FOR NO FURTHER 'RETURN'S.
+                        ;*
+                        ;* 'RETURN(CR>' UNDOS EVERYTHING THAT 'GOSUB' DID. AND THUS RETURN THE
+                        ;* EXCUTION TO THE COMMAND AFTER THE MOST RECENT 'GOSUB'. IF 'STKGOS'
+                        ;* IS ZERO, IT INDICATES THAT WE NEVER HAD A 'GOSUB' AND IS THUS AN ERROR.
+                        ;*
+   f1c5   cd 36 f6      GOSUB  CALL PUSHA       ; SAVE THE CURRENT "FOR"
+   f1c8   cd 5b f3             CALL EXPR        ; PARAMETERS
+   f1cb   d5                   PUSH D           ; AND TEXT POINTER
+   f1cc   cd 64 f5             CALL FNDLN       ; FIND THE TARGET LINE
+   f1cf   c2 fa f5             JNZ  AHOW        ; NOT THERE. SAY "HOW?"
+   f1d2   2a b7 00             LHLD CURRNT      ; SAVE OLD
+   f1d5   e5                   PUSH H           ; 'CURRNT' OLD 'STKGOS'
+   f1d6   2a b9 00             LHLD STKGOS
+   f1d9   e5                   PUSH H
+   f1da   21 00 00             LXI  H,0         ; AND LOAD NEW ONES
+   f1dd   22 bd 00             SHLD LOPVAR
+   f1e0   39                   DAD  SP
+   f1e1   22 b9 00             SHLD STKGOS
+   f1e4   c3 1a f1             JMP  RUNTSL      ; THEN RUN THAT LINE
+   f1e7   cd 2a f5      RETURN CALL ENDCHK      ; THERE MUST BE A CR
+   f1ea   2a b9 00             LHLD STKGOS      ; OLD STACK POINTER
+   f1ed   7c                   MOV  A,H         ; 0 MEANS NOT EXIST
+   f1ee   b5                   ORA  L
+   f1ef   ca 30 f5             JZ   QWHAT       ; SO, WE SAY: "WHAT?"
+   f1f2   f9                   SPHL             ; ELSE, RESTORE IT
+   f1f3   e1            RESTOR POP  H
+   f1f4   22 b9 00             SHLD STKGOS      ; AND THE OLD 'STKGOS'
+   f1f7   e1                   POP  H
+   f1f8   22 b7 00             SHLD CURRNT      ; AND THE OLD 'CURRNT'
+   f1fb   d1                   POP  D           ; OLD TEXT POINTER
+   f1fc   cd 1a f6             CALL POPA        ; OLD "FOR" PARAMETERS
+   f1ff   c3 09 f5             JMP  FINISH
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** FOR *** & NEXT ***
+                        ;*
+                        ;* 'FOR' HAS TWO FORMS:
+                        ;* 'FOR VAR=EXP1 TO EXP2 STEP EXP3' AND 'FOR VAR=EXP1 TO EXP2'
+                        ;* THE SECOND FORM MEANS THE SAME THING AS THE FIRST
+                        ;* FORM WITH EXP3=1. (I.E., WITH A STEP OF +1.) TBI WILL FIND THE
+                        ;* VARIABLE VAR. AND SET ITS VALUE TO THE CURRENT VALUE OF EXP1. IT
+                        ;* ALSO EVALUATES EXP2 AND EXP3 AND SAVE ALL THESE TOGETHER WITH THE
+                        ;* TEXT POINTER ETC. IN THE 'FOR' SAVE AREA, WHICH CONSISTS OF
+                        ;* 'LOPVAR', 'LOPINC', 'LOPLMT', 'LOPLN', AND 'LOPPT'. IF THERE IS
+                        ;* ALREADY SOMETHING IN THE SAVE AREA (THIS IS INDICATED BY A
+                        ;* NON-ZERO 'LOPVAR'), THEN THE OLD SAVE AREA IS SAVED IN THE STACK
+                        ;* BEFORE THE NEW ONE OVERWRITES IT. TBI WILL THEN DIG IN THE STACK
+                        ;* AND FIND OUT IF THIS SAME VARIABLE WAS USED IN ANOTHER CURRENTLY
+                        ;* ACTIVE 'FOR' LOOP. IF THAT IS THE CASE, THEN THE OLD 'FOR' LOOP IS
+                        ;* DEACTIVATED. (PURGED FROM THE STACK..)
+                        ;*
+                        ;* 'NEXT VAR' SERVES AS THE LOGICAL (NOT NECESSARILLY PHYSICAL) END OF
+                        ;* THE 'FOR' LOOP. THE CONTROL VARIABLE VAR. IS CHECKED WITH THE
+                        ;* 'LOPVAR'. IF THEY ARE NOT THE SAME, TBI DIGS IN THE STACK TO FIND
+                        ;* THE RIGHT ONE AND PURGES ALL THOSE THAT DID NOT MATCH. EITHER WAY,
+                        ;* TBI THEN ADDS THE 'STEP' TO THAT VARIABLE AND CHECK THE RESULT WITH
+                        ;* THE LIMIT. IF IT IS WITHIN THE LIMIT, CONTROL LOOPS BACK TO THE
+                        ;* COMMAND FOLLOWING THE 'FOR'. IF OUTSIDE THE LIMIT, THE SAVE AREA IS
+                        ;* PURGED AND EXECUTION CONTINUES.
+                        ;*
+   f202   cd 36 f6      FOR    CALL PUSHA       ; SAVE THE OLD SAVE AREA
+   f205   cd f3 f4             CALL SETVAL      ; SET THE CONTROL VAR.
+   f208   2b                   DCX  H           ; HL IS ITS ADDRESS
+   f209   22 bd 00             SHLD LOPVAR      ; SAVE THAT
+   f20c   21 6e f7             LXI  H,TAB4-1    ; USE 'EXEC' TO LOOK
+   f20f   c3 cf f0             JMP  EXEC        ; FOR THE WORD 'TO'
+   f212   cd 5b f3      FR1    CALL EXPR        ; EVALUATE THE LIMIT
+   f215   22 c1 00             SHLD LOPLMT      ; SAVE THAT
+   f218   21 74 f7             LXI  H,TAB5-1    ; USE 'EXEC' TO LOOK
+   f21b   c3 cf f0             JMP  EXEC        ; FOR THE WORD 'STEP'
+   f21e   cd 5b f3      FR2    CALL EXPR        ; FOUND IT, GET STEP
+   f221   c3 27 f2             JMP  FR4
+   f224   21 01 00      FR3    LXI  H,1         ; NOT FOUND, SET TO 1
+   f227   22 bf 00      FR4    SHLD LOPINC      ; SAVE THAT TOO
+   f22a   2a b7 00             LHLD CURRNT      ; SAVE CURRENT LINE NUMBER
+   f22d   22 c3 00             SHLD LOPLN
+   f230   eb                   XCHG             ; AND TEXT POINTER
+   f231   22 c5 00             SHLD LOPPT
+   f234   01 0a 00             LXI  B,10        ; DIG INTO STACK TO
+   f237   2a bd 00             LHLD LOPVAR      ; FIND 'LOPVAR'
+   f23a   eb                   XCHG
+   f23b   60                   MOV  H,B
+   f23c   68                   MOV  L,B         ; HL=0 NOW
+   f23d   39                   DAD  SP          ; HERE IS THE STACK
+   f23e   c3 42 f2             JMP  FR6
+   f241   09            FR5    DAD  B           ; EACH LEVEL IS 10 DEEP
+   f242   7e            FR6    MOV  A,M         ; GET THAT OLD 'LOPVAR'
+   f243   23                   INX  H
+   f244   b6                   ORA  M
+   f245   ca 62 f2             JZ   FR7         ; 0 SAYS NO MORE IN IT
+   f248   7e                   MOV  A,M
+   f249   2b                   DCX  H
+   f24a   ba                   CMP  D           ; SAME AS THIS ONE?
+   f24b   c2 41 f2             JNZ  FR5
+   f24e   7e                   MOV  A,M         ; THE OTHER HALF?
+   f24f   bb                   CMP  E
+   f250   c2 41 f2             JNZ  FR5
+   f253   eb                   XCHG             ; YES, FOUND ONE
+   f254   21 00 00             LXI  H,0
+   f257   39                   DAD  SP          ; TRY TO MOVE SP
+   f258   44                   MOV  B,H
+   f259   4d                   MOV  C,L
+   f25a   21 0a 00             LXI  H,10
+   f25d   19                   DAD  D
+   f25e   cd 0b f6             CALL MVDOWN      ; AND PURGE 10 WORDS
+   f261   f9                   SPHL             ; IN THE STACK
+   f262   2a c5 00      FR7    LHLD LOPPT       ; JOB DONE, RESTORE DE
+   f265   eb                   XCHG
+   f266   c3 09 f5             JMP FINISH       ; AND CONTINUE
+                        ;*
+   f269   cd 89 f5      NEXT   CALL TSTV        ; GET ADDRESS OF VAR.
+   f26c   da 30 f5             JC   QWHAT       ; NO VARIABLE. "WHAT?"
+   f26f   22 bb 00             SHLD VARNXT      ; YES. SAVE IT
+   f272   d5            NX1    PUSH D           ; SAVE TEXT POINTER
+   f273   eb                   XCHG
+   f274   2a bd 00             LHLD LOPVAR      ; GET VAR. IN 'FOR'
+   f277   7c                   MOV  A,H
+   f278   b5                   ORA  L           ; 0 SAYS NEVER HAD ONE
+   f279   ca 31 f5             JZ   AWHAT       ; SO WE ASK: "WHAT?"
+   f27c   cd ed f4             CALL COMP        ; ELSE WE CHECK THEM
+   f27f   ca 8c f2             JZ   NX2         ; OK, THEY AGREE
+   f282   d1                   POP  D           ; NO. LET'S SEE
+   f283   cd 1a f6             CALL POPA        ; PURGE CURRENT LOOP
+   f286   2a bb 00             LHLD VARNXT      ; AND POP ONE LEVEL
+   f289   c3 72 f2             JMP  NX1         ; GO CHECK AGAIN
+   f28c   5e            NX2    MOV  E,M         ; COME HERE WHEN AGREED
+   f28d   23                   INX  H
+   f28e   56                   MOV  D,M         ; DE=VALUE OF VAR.
+   f28f   2a bf 00             LHLD LOPINC
+   f292   e5                   PUSH H
+   f293   7c                   MOV  A,H
+   f294   aa                   XRA  D           ; S=SIGN DIFFER
+   f295   7a                   MOV  A,D         ; A=SIGN OF DE
+   f296   19                   DAD  D           ; ADD ONE STEP
+   f297   fa 9e f2             JM   NX3         ; CANNOT OVERFLOW
+   f29a   ac                   XRA  H           ; MAY OVERFLOW
+   f29b   fa c2 f2             JM   NX5         ; AND IT DID
+   f29e   eb            NX3    XCHG
+   f29f   2a bd 00             LHLD LOPVAR      ; PUT IT BACK
+   f2a2   73                   MOV  M,E
+   f2a3   23                   INX  H
+   f2a4   72                   MOV  M,D
+   f2a5   2a c1 00             LHLD LOPLMT      ; HL=LIMIT
+   f2a8   f1                   POP  PSW         ; OLD HL
+   f2a9   b7                   ORA  A
+   f2aa   f2 ae f2             JP   NX4         ; STEP > 0
+   f2ad   eb                   XCHG             ; STEP < 0
+   f2ae   cd e3 f4      NX4    CALL CKHLDE      ; COMPARE WITH LIMIT
+   f2b1   d1                   POP  D           ; RESTORE TEXT POINTER
+   f2b2   da c4 f2             JC   NX6         ; OUTSIDE LIMIT
+   f2b5   2a c3 00             LHLD LOPLN       ; WITHIN LIMIT. GO
+   f2b8   22 b7 00             SHLD CURRNT      ; BACK TO THE SAVED
+   f2bb   2a c5 00             LHLD LOPPT       ; 'CURRNT' AND TEXT
+   f2be   eb                   XCHG             ; POINTER
+   f2bf   c3 09 f5             JMP  FINISH
+   f2c2   e1            NX5    POP  H           ; OVERFLOW, PURGE
+   f2c3   d1                   POP D            ; GARBAGE IN STACK
+   f2c4   cd 1a f6      NX6    CALL POPA        ; PURGE THIS LOOP
+   f2c7   c3 09 f5             JMP FINISH
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** REM *** IF *** INPUT *** & LET (& DEFLT) ***
+                        ;*
+                        ;* 'REM' CAN BE FOLLOWED BY ANYTHING AND IS IGNORED 8Y TBI. TBI TREATS
+                        ;* IT LIKE AN 'IF' WITH A FALSE CONDITION.
+                        ;*
+                        ;* 'IF' IS FOLLOWED BY AN EXPR. AS A CONDITION AND ONE OR MORE COMMANDS
+                        ;* (INCLUDING OTHER 'IF'S) SEPERATED BY SEMI-COLONS. NOTE THAT THE
+                        ;* WORD 'THEN' IS NOT USED. TBI EVALUATES THE EXPR. IF IT IS NON-ZERO,
+                        ;* EXECUTION CONTINUES. IF THE EXPR. IS ZERO, THE COMMANDS THAT
+                        ;* FOLLOWS ARE IGNORED AND EXECUTION CONTINUES AT THE NEXT LINE.
+                        ;*
+                        ;* 'INPUT' COMMAND IS LIKE THE 'PRINT' COMMAND. AND IS FOLLOWED BY A
+                        ;* LIST OF ITEMS. IF THE ITEM IS A STRING IN SINGLE OR DOUBLE QOUTES,
+                        ;* OR IS AN UP-ARROW, IT HAS THE SAME EFFECT AS IN 'PRINT'. IF AN ITEM
+                        ;* IS A VARIABLE, THIS VARIABLE NAME IS PRINTED OUT FOLLOWED BY A
+                        ;* COLON. THEN TBI WAITS FOR AN EXPR. TO BE TYPED IN. THE VARIABLE IS
+                        ;* THEN SET TO THE VALUE OF THIS EXPR. IF THE VARIABLE IS PROCEDED BY
+                        ;* A STRING (AGAIN IN SINGLE OR DOUBLE QUOTES), THE STRING WILL BE
+                        ;* PRINTED FOLLOWED BY A COLON. TBI THEN WAITS FOR INPUT EXPR. AND
+                        ;* SET THE VARIABLE TO THE VALUE OF THE EXPR.
+                        ;*
+                        ;* IF THE INPUT EXPR. IS INVALID, TBI WILL PRINT "WHAT?", "HOW?" OR
+                        ;* "SORRY" AND REPRINT THE PROMPT AND REDO THE INPUT. THE EXECUTION
+                        ;* WILL NOT TERMINATE UNLESS YOU TYPE CONTROL-C. THIS IS HANDLED IN
+                        ;* 'INPERR'.
+                        ;*
+                        ;* 'LET' IS FOLLOWED BY A LIST OF ITEMS SEPERATED BY COMMAS. EACH ITEM
+                        ;* CONSISTS OF A VARIABLE, AN EQUAL SIGN, AND AN EXPR. TBI EVALUATES
+                        ;* THE EXPR. AND SET THE VARIBLE TO THAT VALUE. TBI WILL ALSO HANDLE
+                        ;* 'LET' COMMAND WITHOUT THE WORD 'LET'. THIS IS DONE BY 'DEFLT'.
+                        ;*
+   f2ca   21 00 00      REM    LXI  H,0         ; *** REM ***
+   f2cd   c3 d3 f2             JMP  IF1         ; THIS IS LIKE 'IF 0'
+                        ;*
+   f2d0   cd 5b f3      IFF    CALL EXPR        ; *** IF ***
+   f2d3   7c            IF1    MOV  A,H         ; IS THE EXPR.=0?
+   f2d4   b5                   ORA  L
+   f2d5   c2 21 f1             JNZ  RUNSML      ; NO, CONTINUE
+   f2d8   cd 7f f5             CALL FNDSKP      ; YES, SKIP REST OF LINE
+   f2db   d2 1a f1             JNC  RUNTSL      ; AND RUN THE NEXT LINE
+   f2de   c3 53 f0             JMP  RSTART      ; IF NO NEXT, RE-START
+                        ;*
+   f2e1   2a bb 00      INPERR LHLD STKINP      ; *** INPERR ***
+   f2e4   f9                   SPHL             ; RESTORE OLD SP
+   f2e5   e1                   POP  H           ; AND OLD 'CURRNT'
+   f2e6   22 b7 00             SHLD CURRNT
+   f2e9   d1                   POP  D           ; AND OLD TEXT POINTER
+   f2ea   d1                   POP  D           ; REDO INPUT
+                        ;*
+   f2eb                 INPUT  DS   0
+   f2eb   d5            IP1    PUSH D           ; SAVE IN CASE OF ERROR
+   f2ec   cd 74 f6             CALL QTSTG       ; IS NEXT ITEM A STRING?
+   f2ef   c3 1a f3             JMP  IP8         ; NO
+   f2f2   cd 89 f5      IP2    CALL TSTV        ; YES, BUT FOLLOWED BY A
+   f2f5   da 0e f3             JC   IP5         ; VARIABLE? NO.
+   f2f8   cd 2c f3      IP3    CALL IP12
+   f2fb   11 ca 00             LXI  D,BUFFER    ; POINTS TO BUFFER
+   f2fe   cd 5b f3             CALL EXPR        ; EVALUATE INPUT
+   f301   cd 2a f5             CALL ENDCHK
+   f304   d1                   POP  D           ; OK, GET OLD HL
+   f305   eb                   XCHG
+   f306   73                   MOV  M,E         ; SAVE VALUE IN VAR.
+   f307   23                   INX  H
+   f308   72                   MOV  M,D
+   f309   e1            IP4    POP  H           ; GET OLD 'CURRNT'
+   f30a   22 b7 00             SHLD CURRNT
+   f30d   d1                   POP  D           ; AND OLD TEXT POINTER
+   f30e   f1            IP5    POP  PSW         ; PURGE JUNK IN STACK
+   f30f   cd bb f5      IP6    CALL TSTCH       ; IS NEXT CHAR. ","?
+   f312   2c                   DB   ","
+   f313   03                   DB   IP7-$-1
+   f314   c3 eb f2             JMP  INPUT       ; YES, MORE ITEMS.
+   f317   c3 09 f5      IP7    JMP  FINISH
+   f31a   d5            IP8    PUSH D           ; SAVE FOR 'PRTSTG'
+   f31b   cd 89 f5             CALL TSTV        ; MUST BE VARIABLE NOW
+   f31e   d2 24 f3             JNC  IP11
+   f321   c3 30 f5      IP10   JMP  QWHAT       ; "WHAT?" IT IS NOT?
+   f324   43            IP11   MOV  B,E
+   f325   d1                   POP  D
+   f326   cd a3 f6             CALL PRTCHS      ; PRINT THOSE AS PROMPT
+   f329   c3 f8 f2             JMP  IP3         ; YES, INPUT VARIABLE
+   f32c   c1            IP12   POP  B           ; RETURN ACDRESS
+   f32d   d5                   PUSH D           ; SAVE TEXT POINTER
+   f32e   eb                   XCHG
+   f32f   2a b7 00             LHLD CURRNT      ; ALSO SAVE 'CURRNT'
+   f332   e5                   PUSH H
+   f333   21 eb f2             LXI  H,IP1       ; A NEGATIVE NUMBER
+   f336   22 b7 00             SHLD CURRNT      ; AS A FLAG
+   f339   21 00 00             LXI  H,0         ; SAVE SP TOO
+   f33c   39                   DAD  SP
+   f33d   22 bb 00             SHLD STKINP
+   f340   d5                   PUSH D           ; OLD HL
+   f341   3e 20                MVI  A," "       ; PRINT A SPACE
+   f343   c5                   PUSH B
+   f344   c3 9b f7             JMP  GETLN       ; AND GET A LINE
+                        ;*
+   f347   1a            DEFLT  LDAX D           ; *** DEFLT **♦
+   f348   fe 0d                CPI  CR          ; EMPTY LINE IS OK
+   f34a   ca 58 f3             JZ   LT4         ; ELSE IT IS 'LET'
+                        ;*
+   f34d                 LET    DS   0           ; *** LET ***
+   f34d   cd f3 f4      LT2    CALL SETVAL
+   f350   cd bb f5      LT3    CALL TSTCH       ; SET VALUE TO VAR.
+   f353   2c                   DB   ","
+   f354   03                   DB   LT4-$-1
+   f355   c3 4d f3             JMP  LET         ; ITEM BY ITEM
+   f358   c3 09 f5      LT4    JMP  FINISH      ; UNTIL FINISH
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** EXPR ***
+                        ;*
+                        ;* 'EXPR' EVALUATES ARITHMETICAL OR LOGICAL EXPRESSIONS.
+                        ;* <EXPR>::=<EXPR1>
+                        ;*          <EXPR1><REL.OP.><EXPR1>
+                        ;* WHERE <REL.OP.> IS ONE OF THE OPERATORS IN TAB6 AND THE RESULT OF
+                        ;* THESE OPERATIONS IS 1 IF TRUE AND 0 IF FALSE.
+                        ;* <EXPR1>::=(+ OR —)<EXPR2>(+ OR -<EXPR2>)(....)
+                        ;* WHERE () ARE OPTIONAL AND (....) ARE OPTIONAL REPEATS.
+                        ;* <EXPR2>::=<EXPR3>(<* OR /><EXPR3>)(....)
+                        ;* <EXPR3>::=<VARIABLE>
+                        ;*           <FUNCTION>
+                        ;*           (<EXPH>)
+                        ;* <EXPR> IS RECURSIVE SO THAT VARIABLE "@" CAN HAVE AN <EXPR> AS
+                        ;* INDEX. FUNCTIONS CAN HAVE AN <EXPR> AS ARGUMENTS, AND
+                        ;* <EXPR3> CAN BE AN <EXPR> IN PARANTHESE.
+                        ;*
+   f35b   cd a3 f3      EXPR   CALL EXPR1       ; *** EXPR ***
+   f35e   e5                   PUSH H           ; SAVE <EXPR1> VALUE
+   f35f   21 7c f7             LXI  H,TAB6-1    ; LOOKUP REL.OP.
+   f362   c3 cf f0             JMP  EXEC        ; GO DO IT
+   f365   cd 8e f3      XPR1   CALL XPR8        ; REL.OP.">="
+   f368   d8                   RC               ; NO, RETURN HL=0
+   f369   6f                   MOV  L,A         ; YES, RETURN HL=1
+   f36a   c9                   RET
+   f36b   cd 8e f3      XPR2   CALL XPR8        ; REL.OP."#"
+   f36e   c8                   RZ               ; FALSE, RETURN HL=0
+   f36f   6f                   MOV  L,A         ; TRUE, RETURN HL=1
+   f370   c9                   RET
+   f371   cd 8e f3      XPR3   CALL XPR8        ; REL.OP.">"
+   f374   c8                   RZ               ; FALSE
+   f375   d8                   RC               ; ALSO FALSE, HL=0
+   f376   6f                   MOV  L,A         ; TRUE, HL=1
+   f377   c9                   RET
+   f378   cd 8e f3      XPR4   CALL XPR8        ; REL.OP."<="
+   f37b   6f                   MOV  L,A         ; SET HL=1
+   f37c   c8                   RZ               ; REL. TRUE, RETURN
+   f37d   d8                   RC
+   f37e   6c                   MOV  L,H         ; ELSE SET HL=0
+   f37f   c9                   RET
+   f380   cd 8e f3      XPR5   CALL XPR8        ; REL.OP."="
+   f383   c0                   RNZ              ; FALSE, RETRUN HL=0
+   f384   6f                   MOV  L,A         ; ELSE SET HL=1
+   f385   c9                   RET
+   f386   cd 8e f3      XPR6   CALL XPR8        ; REL.OP."<"
+   f389   d0                   RNC              ; FALSE, RETURN HL=0
+   f38a   6f                   MOV  L,A         ; ELSE SET HL=1
+   f38b   c9                   RET
+   f38c   e1            XPR7   POP  H           ; NOT REL.OP.
+   f38d   c9                   RET              ; RETURN HL=<EXPR1>
+   f38e   79            XPR8   MOV  A,C         ; SUBROUTINE FOR ALL
+   f38f   e1                   POP  H           ; REL.OP.'S
+   f390   c1                   POP  B
+   f391   e5                   PUSH H           ; REVERSE TOP OF STACK
+   f392   c5                   PUSH B
+   f393   4f                   MOV  C,A
+   f394   cd a3 f3             CALL EXPR1       ; GET 2ND <EXPR1>
+   f397   eb                   XCHG             ; VALUE IN DE NOW
+   f398   e3                   XTHL             ; 1ST <EXPR1> IN HL
+   f399   cd e3 f4             CALL CKHLDE      ; COMPARE 1ST WITH 2ND
+   f39c   d1                   POP  D           ; RESTORE TEXT POINTER
+   f39d   21 00 00             LXI  H,0         ; SET HL=0, A=1
+   f3a0   3e 01                MVI A,1
+   f3a2   c9                   RET
+                        ;*
+   f3a3   cd bb f5      EXPR1  CALL TSTCH       ; NEGATIVE SIGN?
+   f3a6   2d                   DB   "-"
+   f3a7   06                   DB   XP11-$-1
+   f3a8   21 00 00             LXI  H,0         ; YES. FAKE '0-'
+   f3ab   c3 d5 f3             JMP  XP16        ; TREAT LIKE SUBTRACT
+   f3ae   cd bb f5      XP11   CALL TSTCH       ; POSITIVE SIGN? IGNORE
+   f3b1   2b                   DB   "+"
+   f3b2   00                   DB   XP12-$-1
+   f3b3   cd df f3      XP12   CALL EXPR2       ; 1ST <EXPR2>
+   f3b6   cd bb f5      XP13   CALL TSTCH       ; ADD?
+   f3b9   2b                   DB   "+"
+   f3ba   15                   DB   XP15-$-1
+   f3bb   e5                   PUSH H           ; YES. SAVE VALUE
+   f3bc   cd df f3             CALL EXPR2       ; GET 2ND <EXPR2>
+   f3bf   eb            XP14   XCHG             ; 2ND IN DE
+   f3c0   e3                   XTHL             ; 1ST IN HL
+   f3c1   7c                   MOV  A,H         ; COMPARE SIGN
+   f3c2   aa                   XRA  D
+   f3c3   7a                   MOV  A,D
+   f3c4   19                   DAD  D
+   f3c5   d1                   POP  D           ; RESTORE TEXT POINTER
+   f3c6   fa b6 f3             JM   XP13        ; 1ST 2ND SIGN DIFFER
+   f3c9   ac                   XRA  H           ; 1ST 2ND SIGN EQUAL
+   f3ca   f2 b6 f3             JP   XP13        ; SO IS RESULT
+   f3cd   c3 f9 f5             JMP  QHOW        ; ELSE WE HAVE OVERFLOW
+   f3d0   cd bb f5      XP15   CALL TSTCH       ; SUBTRACT?
+   f3d3   2d                   DB   "-"
+   f3d4   92                   DB   XPR9-$-1
+   f3d5   e5            XP16   PUSH H           ; YES, SAVE 1ST <EXPR2>
+   f3d6   cd df f3             CALL EXPR2       ; GET 2ND <EXPR2>
+   f3d9   cd ce f4             CALL CHGSGN      ; NEGATE
+   f3dc   c3 bf f3             JMP  XP14        ; AND ADD THEM
+                        ;*
+   f3df   cd 43 f4      EXPR2  CALL EXPR3       ; GET 1ST <EXPR3>
+   f3e2   cd bb f5      XP21   CALL TSTCH       ; MULTIPLY?
+   f3e5   2a                   DB   "*"
+   f3e6   2d                   DB   XP24-$-1
+   f3e7   e5                   PUSH H           ; YES, SAVE 1ST
+   f3e8   cd 43 f4             CALL EXPR3       ; AND GET 2ND <EXPR3>
+   f3eb   06 00                MVI  B,0         ; CLEAR B FOR SIGN
+   f3ed   cd cb f4             CALL CHKSGN      ; CHECK SIGN
+   f3f0   e3                   XTHL             ; 1ST IN HL
+   f3f1   cd cb f4             CALL CHKSGN      ; CHECK SIGN OF 1ST
+   f3f4   eb                   XCHG
+   f3f5   e3                   XTHL
+   f3f6   7c                   MOV  A,H         ; IS HL > 255 ?
+   f3f7   b7                   ORA  A
+   f3f8   ca 01 f4             JZ   XP22        ; NO
+   f3fb   7a                   MOV  A,D         ; YES, HOW ABOUT DE
+   f3fc   b2                   ORA  D
+   f3fd   eb                   XCHG             ; PUT SMALLER IN HL
+   f3fe   c2 fa f5             JNZ  AHOW        ; ALSO >, WILL OVERFLOW
+   f401   7d            XP22   MOV  A,L         ; THIS IS DUMB
+   f402   21 00 00             LXI  H,0         ; CLEAR RESULT
+   f405   b7                   ORA  A           ; ADD AND COUNT
+   f406   ca 35 f4             JZ   XP25
+   f409   19            XP23   DAD  D
+   f40a   da fa f5             JC   AHOW        ; OVERFLOW
+   f40d   3d                   DCR  A
+   f40e   c2 09 f4             JNZ  XP23
+   f411   c3 35 f4             JMP  XP25        ; FINISHED
+   f414   cd bb f5      XP24   CALL TSTCH       ; DIVIDE?
+   f417   2f                   DB   "/"
+   f418   4e                   DB   XPR9-$-1
+   f419   e5                   PUSH H           ; YES, SAVE 1ST <EXPR3>
+   f41a   cd 43 f4             CALL EXPR3       ; AND GET 2ND ONE
+   f41d   06 00                MVI  B,0         ; CLEAR B FOR SIGN
+   f41f   cd cb f4             CALL CHKSGN      ; CHECK SIGN OF 2ND
+   f422   e3                   XTHL             ; GET 1ST IN HL
+   f423   cd cb f4             CALL CHKSGN      ; CHECK SIGN OF 1ST
+   f426   eb                   XCHG
+   f427   e3                   XTHL
+   f428   eb                   XCHG
+   f429   7a                   MOV  A,D         ; DIVIDE BY 0?
+   f42a   b3                   ORA  E
+   f42b   ca fa f5             JZ   AHOW        ; SAY "HOW?"
+   f42e   c5                   PUSH B           ; ELSE SAVE SIGN
+   f42f   cd ae f4             CALL DIVIDE      ; USE SUBROUTINE
+   f432   60                   MOV  H,B         ; RESULT IN HL NOW
+   f433   69                   MOV  L,C
+   f434   c1                   POP  B           ; GET SIGN BACK
+   f435   d1            XP25   POP  D           ; AND TEXT POINTER
+   f436   7c                   MOV  A,H         ; HL MUST BE +
+   f437   b7                   ORA  A
+   f438   fa f9 f5             JM   QHOW        ; ELSE IT IS OVERFLOW
+   f43b   78                   MOV  A,B
+   f43c   b7                   ORA  A
+   f43d   fc ce f4             CM   CHGSGN      ; CHANGE SIGN IF NEEDED
+   f440   c3 e2 f3             JMP  XP21        ; LOOK FOR MORE TERMS
+                        ;*
+   f443   21 59 f7      EXPR3  LXI  H,TAB3-1    ; FIND FUNCTION IN TAB3
+   f446   c3 cf f0             JMP  EXEC        ; AND GO DO IT
+   f449   cd 89 f5      NOTF   CALL TSTV        ; NO, NOT A FUNCTION
+   f44c   da 54 f4             JC   XP32        ; NOR A VARIABLE
+   f44f   7e                   MOV  A,M         ; VARIABLE
+   f450   23                   INX  H
+   f451   66                   MOV  H,M         ; VALUE IN HL
+   f452   6f                   MOV  L,A
+   f453   c9                   RET
+   f454   cd cf f5      XP32   CALL TSTNUM      ; OR IS IT A NUMBER
+   f457   78                   MOV  A,B         ; NUMBER OF DIGIT
+   f458   b7                   ORA  A
+   f459   c0                   RNZ              ; OK
+   f45a   cd bb f5      PARN   CALL TSTCH       ; NO DIGIT, MUST BE
+   f45d   28                   DB   "("
+   f45e   09                   DB   XPR0-$-1
+   f45f   cd 5b f3      PARNP  CALL EXPR        ; "(EXPR)"
+   f462   cd bb f5             CALL TSTCH
+   f465   29                   DB   ")"
+   f466   01                   DB   XPR0-$-1
+   f467   c9            XPR9   RET
+   f468   c3 30 f5      XPR0   JMP  QWHAT       ; ELSE SAY: "WHAT?"
+                        ;*
+   f46b   cd 5a f4      RND    CALL PARN        ; *** RND(EXPR) ***
+   f46e   7c                   MOV  A,H         ; EXPR MUST BE +
+   f46f   b7                   ORA  A
+   f470   fa f9 f5             JM   QHOW
+   f473   b5                   ORA  L           ; AND NON-ZERO
+   f474   ca f9 f5             JZ   QHOW
+   f477   d5                   PUSH D           ; SAVE BOTH
+   f478   e5                   PUSH H
+   f479   2a c7 00             LHLD RANPNT      ; GET MEMORY AS RANDOM
+   f47c   11 93 f7             LXI  D,RANEND
+   f47f   cd ed f4             CALL COMP
+   f482   da 88 f4             JC   RA1         ; WRAP AROUND IF LAST
+   f485   21 00 f0             LXI  H,BOTROM
+   f488   5e            RA1    MOV  E,M
+   f489   23                   INX  H
+   f48a   56                   MOV  D,M
+   f48b   22 c7 00             SHLD RANPNT
+   f48e   e1                   POP  H
+   f48f   eb                   XCHG
+   f490   c5                   PUSH B
+   f491   cd ae f4             CALL DIVIDE      ; RND(N)=MOD(M,N)+1
+   f494   c1                   POP  B
+   f495   d1                   POP  D
+   f496   23                   INX  H
+   f497   c9                   RET
+                        ;*
+   f498   cd 5a f4      ABS    CALL PARN        ; *** ABS(EXPR) ***
+   f49b   1b                   DCX  D
+   f49c   cd cb f4             CALL CHKSGN      ; CHECK SIGN
+   f49f   13                   INX  D
+   f4a0   c9                   RET
+                        ;*
+   f4a1   2a 00 20      SIZE   LHLD TXTUNF      ; *** SIZE ***
+   f4a4   d5                   PUSH D           ; GET THE NUMBER OF FREE
+   f4a5   eb                   XCHG             ; BYTES BETWEEN 'TXTUNF'
+   f4a6   2a 81 00             LHLD TXTLMT      ; AND 'TXTLMT'
+   f4a9   cd c4 f4             CALL SUBDE
+   f4ac   d1                   POP  D
+   f4ad   c9                   RET
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** DIVIDE *** SUBDE *** CHKSGN *** CHGSGN *** & CKHLDE ***
+                        ;*
+                        ;* 'DIVIDE' DIVIDES HL BY DE. RESULT IN BC. REMAINDER IN HL
+                        ;*
+                        ;* 'SUBDE' SUBTRACTS DE FROM HL
+                        ;*
+                        ;* 'CHKSGN' CHECKS SIGN OF HL, IF +, NO CHANGE. IF  -, CHANGE SIGN
+                        ;* AND FLIP SIGN OF B.
+                        ;*
+                        ;* 'CHGSGN' CHANGES SIGN OF HL AND B UNCONDITIONALLY.
+                        ;*
+                        ;* 'CKHLDE' CHECKS SIGN OF HL AND DE. IF DIFFERENT, HL AND DE ARE
+                        ;* INTERCHANGED. IF SAME SIGN, NOT INTERCHANGED. EITHER CASE, HL DE
+                        ;* ARE THEN COMPARED TO SET THE FLAGS.
+                        ;*
+   f4ae   e5            DIVIDE PUSH H           ; *** DIVIDE ***
+   f4af   6c                   MOV  L,H         ; DIVIDE H BY DE
+   f4b0   26 00                MVI  H,0
+   f4b2   cd b9 f4             CALL DV1
+   f4b5   41                   MOV  B,C         ; SAVE RESULT IN B
+   f4b6   7d                   MOV  A,L         ; (REMAINDER+L)/DE
+   f4b7   e1                   POP  H
+   f4b8   67                   MOV  H,A
+   f4b9   0e ff         DV1    MVI  C,0FFH       ; (-1) RESULT IN C
+   f4bb   0c            DV2    INR  C           ; DUMB ROUTINE
+   f4bc   cd c4 f4             CALL SUBDE       ; DIVIDE BY SUBTRACT
+   f4bf   d2 bb f4             JNC  DV2         ; AND COUNT
+   f4c2   19                   DAD  D
+   f4c3   c9                   RET
+                        ;*
+   f4c4   7d            SUBDE  MOV  A,L         ; *** SUBDE ***
+   f4c5   93                   SUB  E           ; SUBTRACT DE FROM
+   f4c6   6f                   MOV  L,A         ; HL
+   f4c7   7c                   MOV  A,H
+   f4c8   9a                   SBB  D
+   f4c9   67                   MOV  H,A
+   f4ca   c9                   RET
+                        ;*
+   f4cb   7c            CHKSGN MOV  A,H         ; *** CHKSGN ***
+   f4cc   b7                   ORA  A           ; CHECK SIGN OF HL
+   f4cd   f0                   RP               ; IF -, CHANGE SIGN
+                        ;*
+   f4ce   7c            CHGSGN MOV  A,H         ; *** CHGSGN ***
+   f4cf   b5                   ORA  L
+   f4d0   c8                   RZ
+   f4d1   7c                   MOV  A,H
+   f4d2   f5                   PUSH PSW
+   f4d3   2f                   CMA              ; CHANGE SIGN OF HL
+   f4d4   67                   MOV  H,A
+   f4d5   7d                   MOV  A,L
+   f4d6   2f                   CMA
+   f4d7   6f                   MOV  L,A
+   f4d8   23                   INX  H
+   f4d9   f1                   POP  PSW
+   f4da   ac                   XRA  H
+   f4db   f2 f9 f5             JP   QHOW
+   f4de   78                   MOV  A,B         ; AND ALSO FLIP B
+   f4df   ee 80                XRI  080H
+   f4e1   47                   MOV  B,A
+   f4e2   c9                   RET
+                        ;*
+   f4e3   7c            CKHLDE MOV  A,H
+   f4e4   aa                   XRA  D           ; SAME SIGN?
+   f4e5   f2 e9 f4             JP   CK1         ; YES, COMPARE
+   f4e8   eb                   XCHG             ; NO, XCH AND COMP
+   f4e9   cd ed f4      CK1    CALL COMP
+   f4ec   c9                   RET
+                        ;*
+   f4ed   7c            COMP   MOV  A,H         ; *** COMP ***
+   f4ee   ba                   CMP  D           ; COMPARE HL WITH DE
+   f4ef   c0                   RNZ              ; RETURN CORRECT C AND
+   f4f0   7d                   MOV  A,L         ; Z FLAGS
+   f4f1   bb                   CMP E            ; BUT OLD A IS LOST
+   f4f2   c9                   RET
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** SETVAL *** FIN *** ENDCHK *** & ERROR (& FRIENDS) ***
+                        ;* "SETVAL" EXPECTS A VARIABLE, FOLLOWED BY AN EQUAL SIGN AND THEN AN
+                        ;* EXPR. IT EVALUATES THE EXPR, AND SET THE VARIABLE TO THAT VALUE.
+                        ;* "FIN" CHECKS THE END OF A COMMAND. IF IT ENDED WITH ";", EXECUTION
+                        ;* CONTINUES. IF IT ENDED WITH A CR, IT FINDS THE NEXT LINE AND
+                        ;* CONTINUE FROM THERE.
+                        ;*
+                        ;* "ENDCHK" CHECKS IF A COMMAND IS ENDED WITH CR. THIS IS REQUIRED IN
+                        ;* CERTAIN COMMANDS. (GOTO, RETURN, AND STOP ETC.)
+                        ;*
+                        ;* "ERROR" PRINTS THE STRING POINTED BY DE (AND ENDS WITH CR). IT THEN
+                        ;* PRINTS THE LINE POINTED BY 'CURRNT' WITH A "?" INSERTED AT WHERE THE
+                        ;* OLD TEXT POINTER (SHOULD BE ON TOP OF THE STACK) POINTS TO.
+                        ;* EXECUTION OF TBI IS STOPPED AND TBI IS RESTARTED. HOWEVER, IF
+                        ;* 'CURRNT' -> ZERO (INDICATING A DIRECT COMMAND), THE DIRECT COMMAND
+                        ;* IS NOT PRINTED. AND IF 'CURRNT' -> NEGATIVE NUMBER (INDICATING 'INPUT'
+                        ;* COMMAND, THE INPUT LINE IS NOT PRINTED AND EXECUTION IS NOT
+                        ;* TERMINATED BUT CONTINUED AT 'INPERR'.
+                        ;*
+                        ;* RELATED TO 'ERROR' ARE THE FOLLOWING: 'QWHAT' SAVES TEXT POINTER IN
+                        ;* STACK AND GET MESSAGE "WHAT?" 'AWHAT' JUST GET MESSAGE "WHAT?" AND
+                        ;* JUMP TO 'ERROR'. 'QSORRY' AND 'ASORRY* DO SAME KIND OF THING.
+                        ;* 'QHOW' AND 'AHOW' IN THE ZERO PAGE SECTION ALSO DO THIS.
+                        ;*
+   f4f3   cd 89 f5      SETVAL CALL TSTV        ; *** SETVAL ***
+   f4f6   da 30 f5             JC   QWHAT       ; "WHAT?" NO VARIABLE
+   f4f9   e5                   PUSH H           ; SAVE ADORESS OF VAR.
+   f4fa   cd bb f5             CALL TSTCH       ; PASS "=" SIGN
+   f4fd   3d                   DB   "="
+   f4fe   0d                   DB   SV1-$-1
+   f4ff   cd 5b f3             CALL EXPR        ; EVALUATE EXPR.
+   f502   44                   MOV  B,H         ; VALUE IN BC NOW
+   f503   4d                   MOV  C,L
+   f504   e1                   POP  H           ; GET ADDRESS
+   f505   71                   MOV  M,C         ; SAVE VALUE
+   f506   23                   INX  H
+   f507   70                   MOV  M,B
+   f508   c9                   RET
+                        ;*
+   f509   cd 0f f5      FINISH CALL FIN         ; CHECK END OF COMMAND
+   f50c   c3 30 f5      SV1    JMP  QWHAT       ; PRINT "WHAT?" IF WRONG
+                        ;*
+   f50f   cd bb f5      FIN    CALL TSTCH       ; *** FIN ♦**
+   f512   3b                   DB   ";"
+   f513   04                   DB   FI1-$-1
+   f514   f1                   POP  PSW         ; ";", PURGE RET ADDR.
+   f515   c3 21 f1             JMP  RUNSML      ; CONTINUE SAME LINE
+   f518   cd bb f5      FI1    CALL TSTCH       ; NOT ";", IS IT CR?
+   f51b   0d                   DB   CR
+   f51c   04                   DB   FI2-$-1
+   f51d   f1                   POP  PSW         ; YES, PURGE RET ADDR.
+   f51e   c3 11 f1             JMP  RUNNXL      ; RUN NEXT LINE
+   f521   c9            FI2    RET              ; ELSE RETURN TO CALLER
+                        ;*
+   f522   1a            IGNBLK LDAX D           ; *** IGNBLK ***
+   f523   fe 20                CPI  " "         ; IGNORE BLANKS
+   f525   c0                   RNZ              ; IN TEXT (WHERE DE->)
+   f526   13                   INX  D           ; AND RETURN THE FIRST
+   f527   c3 22 f5             JMP  IGNBLK      ; NON-BLANK CHAR, IN A
+                        ;*
+   f52a   cd 22 f5      ENDCHK CALL IGNBLK      ; *** ENDCHK ***
+   f52d   fe 0d                CPI  CR          ; END WITH CR?
+   f52f   c8                   RZ               ; OK, ELSE SAY: "WHAT?"
+                        ;*
+   f530   d5            QWHAT  PUSH D           ; *** QWHAT ***
+   f531   11 42 f0      AWHAT  LXI  D,WHAT      ; *** AWHAT ***
+   f534   cd 93 f7      ERROR  CALL CRLF
+   f537   cd 65 f6             CALL PRTSTG      ; PRINT ERROR MESSAGE
+   f53a   2a b7 00             LHLD CURRNT      ; GET CURRENT LINE NUMBER
+   f53d   e5                   PUSH H
+   f53e   7e                   MOV  A,M         ; CHECK THE VALUE
+   f53f   23                   INX  H
+   f540   b6                   ORA  M
+   f541   d1                   POP  D
+   f542   ca 26 f0             JZ   TELL        ; IF ZERO, JUST RESTART
+   f545   7e                   MOV  A,M         ; IF NEGATIVE,
+   f546   b7                   ORA  A
+   f547   fa e1 f2             JM   INPERR      ; REDO INPUT
+   f54a   cd f2 f6             CALL PRTLN       ; ELSE PRINT THE LINE
+   f54d   c1                   POP  B
+   f54e   41                   MOV  B,C
+   f54f   cd a3 f6             CALL PRTCHS
+   f552   3e 3f                MVI  A,"?"       ; PRINT A "?"
+   f554   cd 95 f7             CALL OUTCH
+   f557   cd 65 f6             CALL PRTSTG      ; LINE
+   f55a   c3 26 f0             JMP  TELL        ; THEN RESTART
+   f55d   d5            QSORRY PUSH D           ; *** QSORRY ***
+   f55e   11 4d f0      ASORRY LXI  D,SORRY     ; *** ASORRY ***
+   f561   c3 34 f5             JMP  ERROR
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** FNDLN (& FRlENDS) ***
+                        ;*
+                        ;* 'FNDLN' FINDS A LINE WITH A GIVEN LINE NUMBER (IN HL) IN THE TEXT SAVE
+                        ;* AREA. DE IS USED AS THE TEXT POINTER. IF THE LINE IS FOUND, DE
+                        ;* WILL POINT TO THE BEGINNING OF THAT LINE (I.E., THE LOW BYTE OF THE
+                        ;* LINE NUMBER). AND FLAGS ARE NC & Z. IF THAT LINE IS NOT THERE AND A LINE
+                        ;* WiTH A HIGHER LINE NUMBER IS FOUND, DE POINTS TO THERE ANO FLAGS ARE NC &
+                        ;* NZ. IF WE REACHED THE END OF TEXT SAVE AREA AND CANNOT FIND THE
+                        ;* LINE, FLAGS ARE C & NZ. 'FNDLN' WILL INITIALIZE DE TO THE BEGINNING
+                        ;* OF THE TEXT SAVE AREA TO START THE SEARCH. SOME OTHER ENTRIES OF
+                        ;* THIS ROUTINE WILL NOT INITIALIZE DE AND DO THE SEARCH. 'FNDLP'
+                        ;* WILL START WITH DE AND SEARCH FOR THE LINE NUMBER. 'FNCNXT' WILL BUMP DE
+                        ;* BY 2. FIND A CR AND THEN START SEARCH. 'FNDSKP' USE DE TO FIND A
+                        ;* CR, AND THEN START SEARCH.
+                        ;*
+   f564   7c            FNDLN  MOV  A,H         ; *** FNDLN ***
+   f565   b7                   ORA  A           ; CHECK SIGN OF HL
+   f566   fa f9 f5             JM   QHOW        ; IT CANNOT BE -
+   f569   11 02 20             LXI  D,TEXT      ; INIT. TEXT POINTER
+                        ;*
+   f56c   13            FNDLP  INX  D           ; IS IT EOT MARK?
+   f56d   1a                   LDAX D
+   f56e   1b                   DCX  D
+   f56f   87                   ADD  A
+   f570   d8                   RC               ; C,NZ PASSED END
+   f571   1a                   LDAX D           ; WE DID NOT, GET BYTE 1
+   f572   95                   SUB  L           ; IS THIS THE LINE?
+   f573   47                   MOV  B,A         ; COMPARE LOW ORDER
+   f574   13                   INX  D
+   f575   1a                   LDAX D           ; GET BYTE 2
+   f576   9c                   SBB  H           ; COMPARE HIGH ORDER
+   f577   da 7e f5             JC   FL1         ; NO, NOT THERE YET
+   f57a   1b                   DCX  D           ; ELSE WE EITHER FOUND
+   f57b   b0                   ORA  B           ; IT, OR IT IS NOT THERE
+   f57c   c9                   RET              ; NC,Z:FOUND; NC,NZ:NO
+                        ;*
+   f57d   13            FNDNXT INX  D           ; FIND NEXT LINE
+   f57e   13            FL1    INX  D           ; JUST PASSED BYTE 1 & 2
+                        ;*
+   f57f   1a            FNDSKP LDAX D           ; *** FNDSKP ***
+   f580   fe 0d                CPI  CR          ; TRY TO FIND CR
+   f582   c2 7e f5             JNZ  FL1         ; KEEP LOOKING
+   f585   13                   INX  D           ; FOUND CR, SKIP OVER
+   f586   c3 6c f5             JMP  FNDLP       ; CHECK IF END OF TEXT
+                        ;*
+   f589   cd 22 f5      TSTV   CALL IGNBLK      ; *** TSTV ***
+   f58c   d6 40                SUI  "@"         ; TEST VARIABLES
+   f58e   d8                   RC               ; 0:NOT A VARIABLE
+   f58f   c2 ab f5             JNZ  TV1         ; NOT "@" ARRAY
+   f592   13                   INX  D           ; IT IS THE "@" ARRAY
+   f593   cd 5a f4             CALL PARN        ; @ SHOULD BE FOLLOWED
+   f596   29                   DAD  H           ; BY (EXPR) AS ITS INDEX
+   f597   da f9 f5             JC   QHOW        ; IS INDEX TOO BIG?
+   f59a   d5            TSTB   PUSH D           ; WILL IT FIT?
+   f59b   eb                   XCHG
+   f59c   cd a1 f4             CALL SIZE        ; FIND SIZE OF FREE
+   f59f   cd ed f4             CALL COMP        ; AND CHECK THAT
+   f5a2   da 5e f5             JC   ASORRY      ; IF NOT, SAY "SORRY"
+   f5a5   cd 5f f6             CALL LOCR        ; IF FITS, GET ADDRESS
+   f5a8   19                   DAD  D           ; OF @(EXPR) AND PUT IT
+   f5a9   d1                   POP  D           ; IN HL
+   f5aa   c9                   RET              ; C FLAG IS CLEARED
+   f5ab   fe 1b         TV1    CPI 27           ; (ESC). NOT @. IS IT A TO Z?
+   f5ad   3f                   CMC              ; IF NOT RETURN C FLAG
+   f5ae   d8                   RC
+   f5af   13                   INX  D           ; IF A THROUGH Z
+   f5b0   21 81 00             LXI  H,VARBGN-2
+   f5b3   07                   RLC              ; HL—>VARIABLE
+   f5b4   85                   ADD  L           ; RETURN
+   f5b5   6f                   MOV  L,A         ; WITH C FLAG CLEARED
+   f5b6   3e 00                MVI  A,0
+   f5b8   8c                   ADC  H
+   f5b9   67                   MOV  H,A
+   f5ba   c9                   RET
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** TSTCH *** TSTNUM ***
+                        ;*
+                        ;* TSTCH IS USED TO TEST THE NEXT NON-BLANK CHARACTER IN THE TEXT
+                        ;* (POINTED BY DE) AGAINST THE CHARACTER THAT FOLLOWS THE CALL. IF
+                        ;* THEY DO NOT MATCH, N BYTES OF CODE WILL BE SKIPPED OVER. WHERE N IS
+                        ;* BETWEEN 0 AND 255 AND IS STORED IN THE SECOND BYTE FOLLOWING THE
+                        ;* CALL.
+                        ;*
+                        ;* TSTNUM IS USED TO CHECK WHETHER THE TEXT (POINTED BY DE) IS A
+                        ;* NUMBER. IF A NUMBER IS FOUND, B WILL BE NON-ZERO AND HL WILL
+                        ;* CONTAIN THE VALUE (IN BINARY) OF THE NUMBER, ELSE B AND HL ARE 0.
+                        ;*
+   f5bb   e3            TSTCH  XTHL             ; *** TSTCH ***
+   f5bc   cd 22 f5             CALL IGNBLK      ; IGNORE LEADING BLANKS
+   f5bf   be                   CMP  M           ; AND TEST THE CHARACTER
+   f5c0   23                   INX  H           ; COMPARE THE BYTE THAT
+   f5c1   ca cb f5             JZ   TC1         ; FOLLOWS THE CALL INST.
+   f5c4   c5                   PUSH B           ; WITH THE TEXT (DE->)
+   f5c5   4e                   MOV  C,M         ; IF NOT =, ADD THE 2ND
+   f5c6   06 00                MVI  B,0         ; BYTE THAT FOLLOWS THE
+   f5c8   09                   DAD  B           ; CALL TO THE OLD PC
+   f5c9   c1                   POP  B           ; I.E., DO A RELATIVE
+   f5ca   1b                   DCX  D           ; JUMP IF NOT =
+   f5cb   13            TC1    INX  D           ; IF =, SKIP THOSE BYTES
+   f5cc   23                   INX  H           ; AND CONTINUE
+   f5cd   e3                   XTHL
+   f5ce   c9                   RET
+                        ;*
+   f5cf   21 00 00      TSTNUM LXI  H,0         ; *** TSTNUM ***
+   f5d2   44                   MOV  B,H         ; TEST IF THE TEXT IS
+   f5d3   cd 22 f5             CALL IGNBLK      ; A NUMBER
+   f5d6   fe 30         TN1    CPI "0"          ; IF NOT, RETURN 0 IN
+   f5d8   d8                   RC               ; B AND HL
+   f5d9   fe 3a                CPI  ":"         ; IF NUMBERS, CONVERT
+   f5db   d0                   RNC              ; TO BINARY IN HL AND
+   f5dc   3e f0                MVI  A,0F0H       ; SET B TO NUMBER OF DIGITS
+   f5de   a4                   ANA  H           ; IF H>255, THERE IS NO
+   f5df   c2 f9 f5             JNZ  QHOW        ; ROOM FOR NEXT DIGIT
+   f5e2   04                   INR  B           ; B COUNTS NUMBER OF DIGITS
+   f5e3   c5                   PUSH B
+   f5e4   44                   MOV  B,H         ; HL=10*HL*(NEW DIGIT)
+   f5e5   4d                   MOV  C,L
+   f5e6   29                   DAD  H           ; WHERE 10* IS DONE BY
+   f5e7   29                   DAD  H           ; SHIFT AND ADD
+   f5e8   09                   DAD  B
+   f5e9   29                   DAD  H
+   f5ea   1a                   LDAX D           ; AND (DIGIT) IS FROM
+   f5eb   13                   INX  D           ; STRIPPING THE ASCII
+   f5ec   e6 0f                ANI  0FH         ; CODE
+   f5ee   85                   ADD  L
+   f5ef   6f                   MOV  L,A
+   f5f0   3e 00                MVI  A,0
+   f5f2   8c                   ADC  H
+   f5f3   67                   MOV  H,A
+   f5f4   c1                   POP  B
+   f5f5   1a                   LDAX D           ; DO THIS DIGIT AFTER
+   f5f6   f2 d6 f5             JP   TN1         ; DIGIT. 5 SAYS OVERFLOW
+   f5f9   d5            QHOW   PUSH D           ; *** ERROR: "HOW?" ***
+   f5fa   11 48 f0      AHOW   LXI  D,HOW
+   f5fd   c3 34 f5             JMP  ERROR
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** MVUP *** MVDUWN *** POPA *** & PUSHA ***
+                        ;*
+                        ;* 'MVUP' MOVES A BLOCK UP FROM WHERE DE-> TO WHERE BC-> UNTIL DE=HL
+                        ;*
+                        ;* 'MVDOWN' MOVES A BLOCK DOWN FROM WHERE DE-> TO WHERE HL-> UNTIL DE=BC
+                        ;*
+                        ;* 'POPA' RESTORES THE 'FOR' LOOP VARIABLE SAVE AREA FROM THE STACK
+                        ;*
+                        ;* 'PUSHA' STACKS THE 'FOR' LOOP VARIABLE SAVE AREA INTO THE STACK
+                        ;*
+   f600   cd ed f4      MVUP   CALL COMP        ; *** MVUP ***
+   f603   c8                   RZ               ; DE = HL, RETURN
+   f604   1a                   LDAX D           ; GET ONE BYTE
+   f605   02                   STAX B           ; MOVE IT
+   f606   13                   INX  D           ; INCREASE BOTH POINTERS
+   f607   03                   INX  B
+   f608   c3 00 f6             JMP  MVUP        ; UNTIL DONE
+                        ;*
+   f60b   78            MVDOWN MOV A,B          ; *** MVDOWN ***
+   f60c   92                   SUB  D           ; TEST IF DE = BC
+   f60d   c2 13 f6             JNZ  MD1         ; NO, GO MOVE
+   f610   79                   MOV  A,C         ; MAYBE, OTHER BYTE?
+   f611   93                   SUB  E
+   f612   c8                   RZ               ; YES, RETURN
+   f613   1b            MD1    DCX  D           ; ELSE MOVE A BYTE
+   f614   2b                   DCX  H           ; BUT FIRST DECREASE
+   f615   1a                   LDAX D           ; BOTH POINTERS AND
+   f616   77                   MOV  M,A         ; THEN DO IT
+   f617   c3 0b f6             JMP  MVDOWN      ; LOOP BACK
+                        ;*
+   f61a   c1            POPA   POP  B           ; BC = RETURN ADDR
+   f61b   e1                   POP  H           ; RESTORE LOPVAR, BUT
+   f61c   22 bd 00             SHLD LOPVAR      ; =0 MEANS NO MORE
+   f61f   7c                   MOV  A,H
+   f620   b5                   ORA  L
+   f621   ca 34 f6             JZ   PP1         ; YEP, GO RETURN
+   f624   e1                   POP  H           ; NOP, RESTORE OTHERS
+   f625   22 bf 00             SHLD LOPINC
+   f628   e1                   POP  H
+   f629   22 c1 00             SHLD LOPLMT
+   f62c   e1                   POP  H
+   f62d   22 c3 00             SHLD LOPLN
+   f630   e1                   POP  H
+   f631   22 c5 00             SHLD LOPPT
+   f634   c5            PP1    PUSH B           ; BC = RETURN ADDR
+   f635   c9                   RET
+                        ;*
+   f636   21 52 01      PUSHA  LXI  H,STKLMT    ; *** PUSHA ***
+   f639   cd ce f4             CALL CHGSGN
+   f63c   c1                   POP  B           ; BC=RETURN ADDRESS
+   f63d   39                   DAD  SP          ; IS STACK NEAR THE TOP?
+   f63e   d2 5d f5             JNC  QSORRY      ; YES, SORRY FOR THAT
+   f641   2a bd 00             LHLD LOPVAR      ; ELSE SAVE LOOP VAR'S
+   f644   7c                   MOV  A,H         ; BUT IF LOPVAR IS 0
+   f645   b5                   ORA  L           ; THAT WILL BE ALL
+   f646   ca 5c f6             JZ   PU1
+   f649   2a c5 00             LHLD LOPPT       ; ELSE, MORE TO SAVE
+   f64c   e5                   PUSH H
+   f64d   2a c3 00             LHLD LOPLN
+   f650   e5                   PUSH H
+   f651   2a c1 00             LHLD LOPLMT
+   f654   e5                   PUSH H
+   f655   2a bf 00             LHLD LOPINC
+   f658   e5                   PUSH H
+   f659   2a bd 00             LHLD LOPVAR
+   f65c   e5            PU1    PUSH H
+   f65d   c5                   PUSH B           ; BC = RETURN ADDR
+   f65e   c9                   RET
+   f65f   2a 00 20      LOCR   LHLD TXTUNF
+   f662   2b                   DCX  H
+   f663   2b                   DCX  H
+   f664   c9                   RET
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** PRTSTG *** QTSTG *** PRTNUM *** & PRTLN ***
+                        ;*
+                        ;* 'PRTSTG' PRINTS A STRING POINTED BY DE. IT STOPS PRINTING AND
+                        ;* RETURNS TO CALLER WHEN EITHER A CR IS PRINTED OR WHEN THE NEXT BYTE
+                        ;* IS ZERO. REG. A AND B ARE CHANGED. REG. DE POINTS TO WHAT FOLLOWS
+                        ;* THE CR OR TO THE ZERO.
+                        ;*
+                        ;* 'QTSTG' LOOKS FOR UP-ARROW, SINGLE QUOTE, OR DOUBLE QUOTE. IF NONE
+                        ;* OF THESE, RETURN TO CALLER. IF UP-ARROW, OUTPUT A CONTROL
+                        ;* CHARACTER. IF SINGLE OR DOUBLE QUOTE, PRINT THE STRING IN THE QUOTE
+                        ;* AND DEMANDS A MATCHING UNQUOTE. AFTER THE PRINTING THE NEXT 3 BYTES
+                        ;* OF THE CALLER IS SKIPPED OVER (USUALLY A JUMP INSTRUCTION).
+                        ;*
+                        ;* 'PRTNUM' PRINTS THE NUMBER IN HL. LEADING BLANKS ARE ADDED IF
+                        ;* NEEDED TO PAD THE NUMBER OF SPACES TO THE NUMBER IN C. HOWEVER, IF
+                        ;* THE NUMBER OF DIGITS IS LARGER THAN THE NUMBER IN C, ALL DIGITS ARE
+                        ;* PRINTED ANYWAY. NEGATIVE SIGN IS ALSO PRINTED ANC COUNTED IN.
+                        ;* POSITIVE SIGN IS NOT.
+                        ;*
+                        ;* 'PRTLN' FINDS A SAVED LINE, PRINTS THE LINE NUMBER AND A SPACE.
+                        ;*
+   f665   97            PRTSTG SUB  A           ; *** PRTSTG * + *
+   f666   47            PS1    MOV  B,A
+   f667   1a            PS2    LDAX D           ; GET A CHARACTER
+   f668   13                   INX  D           ; BUMP POINTER
+   f669   b8                   CMP  B           ; SAME AS OLD A?
+   f66a   c8                   RZ               ; YES, RETURN
+   f66b   cd 95 f7             CALL OUTCH       ; ELSE PRINT IT
+   f66e   fe 0d                CPI  CR          ; WAS IT A CR?
+   f670   c2 67 f6             JNZ  PS2         ; NO, NEXT
+   f673   c9                   RET              ; YES, RETURN
+                        ;*
+   f674   cd bb f5      QTSTG  CALL TSTCH       ; *** QTSTG ***
+   f677   22                   DB   '"'         ; 41301
+   f678   0f                   DB   QT3-$-1
+   f679   3e 22                MVI  A,22H       ; IT IS A "
+   f67b   cd 66 f6      QT1    CALL PS1         ; PRINT UNTIL ANOTHER
+   f67e   fe 0d         QT2    CPI  CR          ; WAS LAST ONE A CR?
+   f680   e1                   POP  H           ; RETURN ADDRESS
+   f681   ca 11 f1             JZ   RUNNXL      ; WAS CR, RUN NEXT LINE
+   f684   23                   INX  H           ; SKIP 3 BYTES ON RETURN
+   f685   23                   INX  H
+   f686   23                   INX  H
+   f687   e9                   PCHL             ; RETURN
+   f688   cd bb f5      QT3    CALL TSTCH       ; IS IT A ESC?
+   f68b   27                   DB   27H
+   f68c   05                   DB   QT4-$-1
+   f68d   3e 27                MVI  A,27H       ; YES, DO SAME
+   f68f   c3 7b f6             JMP  QT1         ; AS IN "
+   f692   cd bb f5      QT4    CALL TSTCH       ; IS IT AN UP-ARROW?
+   f695   5e                   DB   "^"
+   f696   0b                   DB   QT5-$-1
+   f697   1a                   LDAX D           ; YES, CONVERT CHARACTER
+   f698   ee 40                XRI  40H         ; TO CONTROL-CH. (@)
+   f69a   cd 95 f7             CALL OUTCH
+   f69d   1a                   LDAX D           ; JUST IN CASE IT IS A CR
+   f69e   13                   INX  D
+   f69f   c3 7e f6             JMP  QT2
+   f6a2   c9            QT5    RET              ; NONE OF ABOVE
+                        ;*
+   f6a3   7b            PRTCHS MOV  A,E
+   f6a4   b8                   CMP  B
+   f6a5   c8                   RZ
+   f6a6   1a                   LDAX D
+   f6a7   cd 95 f7             CALL OUTCH
+   f6aa   13                   INX  D
+   f6ab   c3 a3 f6             JMP PRTCHS
+                        ;*
+   f6ae                 PRTNUM DS   0           ; *** PRTNUM ***
+   f6ae   06 00         PN3    MVI  B,0         ; B=SIGN
+   f6b0   cd cb f4             CALL CHKSGN      ; CHECK SIGN
+   f6b3   f2 b9 f6             JP   PN4         ; NO SIGN
+   f6b6   06 2d                MVI  B,"-"       ; B=SIGN
+   f6b8   0d                   DCR  C           ; TAKES SPACE
+   f6b9   d5            PN4    PUSH D
+   f6ba   11 0a 00             LXI  D,10        ; DECIMAL
+   f6bd   d5                   PUSH D           ; SAVE AS A FLAG
+   f6be   0d                   DCR  C           ; C=SPACES
+   f6bf   c5                   PUSH B           ; SAVE SIGN & SPACE
+   f6c0   cd ae f4      PN5    CALL DIVIDE      ; DIVIDE HL BY 10
+   f6c3   78                   MOV  A,B         ; RESULT 0?
+   f6c4   b1                   ORA  C
+   f6c5   ca d0 f6             JZ   PN6         ; YES, ME GOT ALL
+   f6c8   e3                   XTHL             ; NO, SAVE REMAINDER
+   f6c9   2d                   DCR  L           ; AND COUNT SPACE
+   f6ca   e5                   PUSH H           ; HL IS OLD BC
+   f6cb   60                   MOV  H,B         ; MOVE RESULT TO BC
+   f6cc   69                   MOV  L,C
+   f6cd   c3 c0 f6             JMP  PN5         ; AND DIVIDE BY 10
+   f6d0   c1            PN6    POP  B           ; WE GOT ALL DIGITS IN
+   f6d1   0d            PN7    DCR  C           ; THE STACK
+   f6d2   79                   MOV  A,C         ; LOOK AT SPACE COUNT
+   f6d3   b7                   ORA  A
+   f6d4   fa df f6             JM   PN8         ; NO LEADING BLANKS
+   f6d7   3e 20                MVI  A," "       ; LEADING BLANKS
+   f6d9   cd 95 f7             CALL OUTCH
+   f6dc   c3 d1 f6             JMP  PN7         ; MORE?
+   f6df   78            PN8    MOV  A,B         ; PRINT SIGN
+   f6e0   b7                   ORA  A
+   f6e1   c4 95 f7             CNZ  OUTCH       ; MAYBE - OR NULL
+   f6e4   5d                   MOV  E,L         ; LAST REMAINDER IN E
+   f6e5   7b            PN9    MOV  A,E         ; CHECK DIGIT IN E
+   f6e6   fe 0a                CPI  10          ; 10 IS FLAG FOR NO MORE
+   f6e8   d1                   POP  D
+   f6e9   c8                   RZ               ; IF SO, RETURN
+   f6ea   c6 30                ADI "0"          ; ELSE CONVERT TO ASCII
+   f6ec   cd 95 f7             CALL OUTCH       ; AND PRINT THE DIGIT
+   f6ef   c3 e5 f6             JMP  PN9         ; GO BACK FOR MORE
+                        ;*
+   f6f2   1a            PRTLN  LDAX D           ; *** PRTLN ***
+   f6f3   6f                   MOV  L,A         ; LOW ORDER LINE NUMBER
+   f6f4   13                   INX  D
+   f6f5   1a                   LDAX D           ; HIGH ORDER LINE NUMBER
+   f6f6   67                   MOV  H,A
+   f6f7   13                   INX  D
+   f6f8   0e 04                MVI  C,4         ; PRINT 4 DIGIT LINE NUMBER
+   f6fa   cd ae f6             CALL PRTNUM
+   f6fd   3e 20                MVI  A," "       ; FOLLOWED BY A BLANK
+   f6ff   cd 95 f7             CALL OUTCH
+   f702   c9                   RET
+                        ;*
+                        ;*
+                        ;*
+                        ;* TAB1-1 IS THE TABLE OF ALL DIRECT AND STATEMENT COMMANDS.
+                        ;* THE TABLE CONSISTS OF ANY NUMBER OF ITEMS. EACH ITEM IS A STRING OF
+                        ;* CHARACTERS WITH BIT 7 SET TO 0 AND A JUMP ADDRESS STORED HI-LOW WITH
+                        ;* BIT 7 OF THE HIGH BYTE SET TO 1.
+                        ;* END OF TABLE IS AN ITEM WITH A JUMP ADDRESS ONLY.
+                        ;*
+                        ;*
+                        ;*
+                                             ;  *********************
+   f703   4c 49 53 54   TAB1   DB "LIST"     ; *** DIRECT COMMANDS ***
+                                             ;  *********************
+   f707   f1 3b                DB HIGH LIST,   LOW LIST
+   f709   4e 45 57             DB "NEW"
+   f70c   f0 ff                DB HIGH NEW,    LOW NEW
+   f70e   52 55 4e             DB "RUN"
+   f711   f1 0b                DB HIGH RUN,    LOW RUN
+                        ;*
+                                             ;  **********************
+   f713   4e 45 58 54   TAB2   DB "NEXT"     ; *** DIRECT/STATEMENT ***
+                                             ;  **********************
+   f717   f2 69                DB HIGH NEXT,   LOW NEXT
+   f719   4c 45 54             DB "LET"
+   f71c   f3 4d                DB HIGH LET,    LOW LET
+   f71e   49 46                DB "IF"
+   f720   f2 d0                DB HIGH IFF,    LOW IFF
+   f722   47 4f 54 4f          DB "GOTO"
+   f726   f1 2a                DB HIGH GOTO,   LOW GOTO
+   f728   47 4f 53 55          DB "GOSUB"
+   f72c   42            
+   f72d   f1 c5                DB HIGH GOSUB,  LOW GOSUB
+   f72f   52 45 54 55          DB "RETURN"
+   f733   52 4e         
+   f735   f1 e7                DB HIGH RETURN, LOW RETURN
+   f737   52 45 4d             DB "REM"
+   f73a   f2 ca                DB HIGH REM,    LOW REM
+   f73c   46 4f 52             DB "FOR"
+   f73f   f2 02                DB HIGH FOR,    LOW FOR
+   f741   49 4e 50 55          DB "INPUT"
+   f745   54            
+   f746   f2 eb                DB HIGH INPUT,  LOW INPUT
+   f748   50 52 49 4e          DB "PRINT"
+   f74c   54            
+   f74d   f1 6b                DB HIGH PRINT,  LOW PRINT
+   f74f   53 54 4f 50          DB "STOP"
+   f753   f1 05                DB HIGH STOP,   LOW STOP
+   f755   f7 57                DB HIGH MOREC,  LOW MOREC
+                        ;*
+                                             ;  **********************
+   f757   c3 47 f3      MOREC  JMP  DEFLT    ; *** JMP USER-COMMAND ***
+                                             ;  **********************
+                        ;*
+   f75a   52 4e 44      TAB3   DB "RND"      ; *** FUNCTIONS ***
+   f75d   f4 6b                DB HIGH RND,   LOW RND
+   f75f   41 42 53             DB "ABS"
+   f762   f4 98                DB HIGH ABS,   LOW ABS
+   f764   53 49 5a 45          DB "SIZE"
+   f768   f4 a1                DB HIGH SIZE,  LOW SIZE
+   f76a   f7 6c                DB HIGH MOREF, LOW MOREF
+                        ;*
+                                                ;  ***********************
+   f76c   c3 49 f4      MOREF  JMP  NOTF        ; *** JMP USER-FUNCTION ***
+                                                ;  ***********************
+                        ;*
+   f76f   54 4f         TAB4   DB "TO"          ; "FOR" COMMAND
+   f771   f2 12                DB HIGH FR1,   LOW FR1
+   f773   f5 30                DB HIGH QWHAT, LOW QWHAT
+                        ;*
+   f775   53 54 45 50   TAB5   DB "STEP"         ; "FOR" COMMAND
+   f779   f2 1e                DB HIGH FR2,   LOW FR2
+   f77b   f2 24                DB HIGH FR3,   LOW FR3
+                        ;*
+                                               ;  ************************
+                                               ; *** RELATION OPERATORS ***
+                                               ;  ************************
+   f77d   3e 3d         TAB6   DB ">="
+   f77f   f3 65                DB HIGH XPR1, LOW XPR1
+   f781   23                   DB "#"
+   f782   f3 6b                DB HIGH XPR2, LOW XPR2
+   f784   3e                   DB ">"
+   f785   f3 71                DB HIGH XPR3, LOW XPR3
+   f787   3d                   DB "="
+   f788   f3 80                DB HIGH XPR5, LOW XPR5
+   f78a   3c 3d                DB "<="
+   f78c   f3 78                DB HIGH XPR4, LOW XPR4
+   f78e   3c                   DB "<"
+   f78f   f3 86                DB HIGH XPR6, LOW XPR6
+   f791   f3 8c                DB HIGH XPR7, LOW XPR7
+   f793                 RANEND EQU $
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** INPUT OUTPUT ROUTINES ***
+                        ;*
+                        ;* USER MUST VERIFY AND/OR MODIFY THESE ROUTINES
+                        ;*
+                        ;**************************************
+                        ;*
+                        ;* *** CRLF *** OUTCH ***
+                        ;*
+                        ;* CRLF WILL OUTPUT A CR. ONLY A & FLAGS MAY CHANGE AT RETURN
+                        ;*
+                        ;* OUTCH WILL OUTPUT THE CHARACTER IN A. IF THE CHARACTER IS CR, IT
+                        ;* WILL ALSO OUTPUT A LF AND THREE NULLS. FLAGS MAY CHANGE AT RETURN,
+                        ;* OTHER REGISTERS DO NOT.
+                        ;*
+                        ;* *** CHKIO *** GETLN ***
+                        ;*
+                        ;* CHKIO CHECKS TO SEE IF THERE IS ANY INPUT. IF NO INPUT, IT RETURNS
+                        ;* WITH Z FLAG. IF THERE IS INPUT, IT FURTHER CHECKS WHETHER INPUT IS
+                        ;* CONTROL—C. IF NOT CONTROL-C, IT RETURNS THE CHARACTER IN A WITH Z
+                        ;* FLAG CLEARED. IF INPUT IS CONTROL-C, CHKIO JUMPS TO 'INIT' AND WILL
+                        ;* NOT RETURN. ONLY A & FLAGS MAY CHANGE AT RETURN.
+                        ;*
+                        ;* 'GETLN' READS A INPUT LINE INTO 'BUFFER'. IT FIRST PROMPT THE
+                        ;* CHARACTER IN A (GIVEN BY THE CALLER), THEN IT FILLS THE THE BUFFER
+                        ;* AND ECHOS. BACK—SPACE IS USED TO DELETE THE LAST CHARATER (IF THERE
+                        ;* IS ONE). CR SIGNALS THE END OF THE LINE, AND CAUSE 'GETLN' TO
+                        ;* RETURN. WHEN BUFFER IS FULL, 'GETLN' WILL ACCEPT BACK-SPACE OR CR
+                        ;* ONLY AND WILL IGNORE (AND WILL NOT ECHO) OTHER CHARACTERS. AFTER
+                        ;* THE INPUT LINE IS STORED IN THE BUFFER, TWO MORE BYTES OF FF ARE
+                        ;* ALSO STORED AND DE POINTS TO THE LAST FF. A & FLAGS ARE ALSO
+                        ;* CHANGED AT RETURN.
+                        ;*
+   f793   3e 0d         CRLF   MVI  A,CR        ; CR IN A
+                                                ;  *********************
+   f795   c3 d6 f7      OUTCH  JMP  XOUTX       ; *** JMP USER-OUTPUT ***
+                                                ;  *********************
+   f798   c3 ec f7      CHKIO  JMP  XINX        ; *** JMP USER-INPUT ****
+                                                ;  *********************
+   f79b   11 ca 00      GETLN  LXI  D,BUFFER    ; ***** MODIFY THIS *****
+                                                ;  *********************
+   f79e   cd 95 f7      GL1    CALL OUTCH       ; PROMPT OR ECHO
+   f7a1   cd 98 f7      GL2    CALL CHKIO       ; GET A CHARACTER
+   f7a4   ca a1 f7             JZ   GL2         ; WAIT FOR INPUT
+   f7a7   fe 0a                CPI  LF
+   f7a9   ca a1 f7             JZ   GL2
+   f7ac   12            GL3    STAX D           ; SAVE CH.
+   f7ad   fe 08                CPI  08H         ; IS IT BACK-SPACE?
+   f7af   c2 bd f7             JNZ  GL4         ; NO, MORE TESTS
+   f7b2   7b                   MOV  A,E         ; YES, DELETE?
+   f7b3   fe ca                CPI  LOW BUFFER
+   f7b5   ca a1 f7             JZ   GL2         ; NOTHING TO DELETE
+   f7b8   1a                   LDAX D           ; DELETE
+   f7b9   1b                   DCX  D
+   f7ba   c3 9e f7             JMP  GL1
+   f7bd   fe 0d         GL4    CPI  CR          ; WAS IT CR?
+   f7bf   ca cd f7             JZ   GL5         ; YES, END OF LINE
+   f7c2   7b                   MOV  A,E         ; ELSE, MORE FREE ROOM?
+   f7c3   fe 4e                CPI  LOW BUFEND
+   f7c5   ca a1 f7             JZ   GL2         ; NO, WAIT FOR CR/RUB-OUT
+   f7c8   1a                   LDAX D           ; YES, BUMP POINTER
+   f7c9   13                   INX  D
+   f7ca   c3 9e f7             JMP  GL1
+   f7cd   13            GL5    INX  D           ; END OF LINE
+   f7ce   13                   INX  D           ; BUMP POINTER
+   f7cf   3e ff                MVI  A,0FFH       ; PUT MARKER AFTER IT
+   f7d1   12                   STAX D
+   f7d2   1b                   DCX  D
+   f7d3   c3 93 f7             JMP  CRLF
+   f7d6   f5            XOUTX  PUSH PSW         ; OUTPUT ROUTINE
+   f7d7   db 00         OT1    IN   0           ; PRINT WHAT IS IN A
+   f7d9   e6 01                ANI  01H         ; TBE BIT
+   f7db   ca d7 f7             JZ   OT1         ; WAIT UNTIL READY
+   f7de   f1                   POP  PSW
+   f7df   d3 01                OUT  1
+   f7e1   fe 0d                CPI  CR          ; WAS IT CR?
+   f7e3   c0                   RNZ              ; NO, RETURN
+   f7e4   3e 0a                MVI  A,LF        ; YES, GIVE LF
+   f7e6   cd d6 f7             CALL XOUTX
+   f7e9   3e 0d                MVI  A,CR
+   f7eb   c9                   RET
+   f7ec   db 00         XINX   IN   0
+   f7ee   e6 02                ANI  02H         ; DAV BIT
+   f7f0   c8                   RZ               ; NO INPUT, RETURN ZERO
+   f7f1   db 01                IN   1           ; CHECK INPUT
+   f7f3   e6 7f                ANI  07FH
+   f7f5   fe 03                CPI  03H         ; IS IT CONTROL-C?
+   f7f7   c0                   RNZ              ; NO, RETURN CH.
+   f7f8   c3 00 f0             JMP INIT         ; YES, RESTART
+   f7fb                        END
+f498  ABS           f5fa  AHOW          f55e  ASORRY        f531  AWHAT     
+2000  BOTRAM        f000  BOTROM        0080  BOTSCR        014e  BUFEND    
+00ca  BUFFER        f4ce  CHGSGN        f798  CHKIO         f4cb  CHKSGN    
+f4e9  CK1           f4e3  CKHLDE        f4ed  COMP          000d  CR        
+f793  CRLF          00b7  CURRNT        f347  DEFLT         4000  DFTLMT    
+f0cc  DIRECT        f4ae  DIVIDE        f4b9  DV1           f4bb  DV2       
+f52a  ENDCHK        f534  ERROR         f0d3  EX1           f0e6  EX2       
+f0f0  EX3           f0f2  EX4           f0f7  EX5           f0cf  EXEC      
+f35b  EXPR          f3a3  EXPR1         f3df  EXPR2         f443  EXPR3     
+f518  FI1           f521  FI2           f50f  FIN           f509  FINISH    
+f57e  FL1           f564  FNDLN         f56c  FNDLP         f57d  FNDNXT    
+f57f  FNDSKP        f202  FOR           f212  FR1           f21e  FR2       
+f224  FR3           f227  FR4           f241  FR5           f242  FR6       
+f262  FR7           f79b  GETLN         f79e  GL1           f7a1  GL2       
+f7ac  GL3           f7bd  GL4           f7cd  GL5           f1c5  GOSUB     
+f12a  GOTO          f048  HOW           f2d3  IF1           f2d0  IFF       
+f522  IGNBLK        f000  INIT          f2e1  INPERR        f2eb  INPUT     
+f2eb  IP1           f321  IP10          f324  IP11          f32c  IP12      
+f2f2  IP2           f2f8  IP3           f309  IP4           f30e  IP5       
+f30f  IP6           f317  IP7           f31a  IP8           0080  KEYWRD    
+f34d  LET           000a  LF            f13b  LIST          f65f  LOCR      
+00bf  LOPINC        00c1  LOPLMT        00c3  LOPLN         00c5  LOPPT     
+00bd  LOPVAR        f14a  LS1           f151  LS2           f34d  LT2       
+f350  LT3           f358  LT4           f613  MD1           f757  MOREC     
+f76c  MOREF         f02f  MSG           f60b  MVDOWN        f600  MVUP      
+f0ff  NEW           f269  NEXT          f449  NOTF          f272  NX1       
+f28c  NX2           f29e  NX3           f2ae  NX4           f2c2  NX5       
+f2c4  NX6           f03f  OK            f7d7  OT1           f795  OUTCH     
+f45a  PARN          f45f  PARNP         f6ae  PN3           f6b9  PN4       
+f6c0  PN5           f6d0  PN6           f6d1  PN7           f6df  PN8       
+f6e5  PN9           f61a  POPA          f634  PP1           f178  PR1       
+f183  PR2           f188  PR3           f196  PR4           f19c  PR5       
+f1a1  PR6           f1ae  PR7           f1b4  PR8           f1ba  PR9       
+f16b  PRINT         f6a3  PRTCHS        f6f2  PRTLN         f6ae  PRTNUM    
+f665  PRTSTG        f666  PS1           f667  PS2           f65c  PU1       
+f01b  PURGE         f636  PUSHA         f5f9  QHOW          f55d  QSORRY    
+f67b  QT1           f67e  QT2           f688  QT3           f692  QT4       
+f6a2  QT5           f674  QTSTG         f530  QWHAT         f488  RA1       
+f793  RANEND        00c7  RANPNT        f2ca  REM           f1f3  RESTOR    
+f1e7  RETURN        f46b  RND           f053  RSTART        f10b  RUN       
+f111  RUNNXL        f121  RUNSML        f11a  RUNTSL        f4f3  SETVAL    
+f4a1  SIZE          f04d  SORRY         f05c  ST1           f06b  ST2       
+f096  ST3           0200  STACK         00b9  STKGOS        00bb  STKINP    
+0152  STKLMT        f105  STOP          f4c4  SUBDE         f50c  SV1       
+f703  TAB1          f713  TAB2          f75a  TAB3          f76f  TAB4      
+f775  TAB5          f77d  TAB6          f5cb  TC1           f026  TELL      
+2002  TEXT          f5d6  TN1           0200  TOPSCR        f59a  TSTB      
+f5bb  TSTCH         f5cf  TSTNUM        f589  TSTV          f5ab  TV1       
+0081  TXTLMT        2000  TXTUNF        0083  VARBGN        00bb  VARNXT    
+f042  WHAT          f7ec  XINX          f7d6  XOUTX         f3ae  XP11      
+f3b3  XP12          f3b6  XP13          f3bf  XP14          f3d0  XP15      
+f3d5  XP16          f3e2  XP21          f401  XP22          f409  XP23      
+f414  XP24          f435  XP25          f454  XP32          f468  XPR0      
+f365  XPR1          f36b  XPR2          f371  XPR3          f378  XPR4      
+f380  XPR5          f386  XPR6          f38c  XPR7          f38e  XPR8      
+f467  XPR9          
+
